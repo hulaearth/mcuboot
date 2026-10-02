@@ -699,6 +699,81 @@ bs_rc_rsp(int rc_code)
     boot_serial_output();
 }
 
+#ifdef MCUBOOT_SERIAL_IMG_GRP_IMAGE_ERASE
+#if BOOT_IMAGE_NUMBER != 1 || BOOT_NUM_SLOTS != 2
+#error "Serial inactive image erase requires one image with two slots"
+#endif
+
+/* Erase secondary only after boot_go() selected primary. */
+static void
+bs_erase(uint8_t op, char *buf, int len)
+{
+    uint32_t slot = BOOT_SLOT_SECONDARY;
+    const struct flash_area *primary = NULL;
+    const struct flash_area *secondary = NULL;
+    zcbor_state_t zsd[4 + CBOR_EXTRA_STATES];
+    bool ok;
+    int rc;
+
+    if (op != NMGR_OP_WRITE) {
+        bs_rc_rsp(MGMT_ERR_ENOTSUP);
+        return;
+    }
+
+    /* Accept an empty map or a single slot field; reject ambiguous requests. */
+    zcbor_new_decode_state(zsd, ARRAY_SIZE(zsd), (uint8_t *)buf, len, 1, NULL, 0);
+    ok = zcbor_map_start_decode(zsd);
+    if (ok && !zcbor_array_at_end(zsd)) {
+        ok = zcbor_tstr_expect_lit(zsd, "slot") && zcbor_uint32_decode(zsd, &slot);
+    }
+    ok = ok && zcbor_map_end_decode(zsd) && zcbor_payload_at_end(zsd);
+    if (!ok || slot != BOOT_SLOT_SECONDARY) {
+        bs_rc_rsp(MGMT_ERR_EINVAL);
+        return;
+    }
+
+    if (!boot_serial_active_image.valid) {
+        bs_rc_rsp(MGMT_ERR_EBUSY);
+        return;
+    }
+
+    rc = flash_area_open(FLASH_AREA_IMAGE_PRIMARY(0), &primary);
+    if (rc != 0) {
+        rc = MGMT_ERR_EUNKNOWN;
+        goto out;
+    }
+    if (flash_area_get_device_id(primary) != boot_serial_active_image.flash_dev_id ||
+        flash_area_get_off(primary) != boot_serial_active_image.image_off) {
+        rc = MGMT_ERR_EBUSY;
+        goto out;
+    }
+
+    rc = flash_area_open(FLASH_AREA_IMAGE_SECONDARY(0), &secondary);
+    if (rc != 0) {
+        rc = MGMT_ERR_EUNKNOWN;
+        goto out;
+    }
+    if (flash_area_get_device_id(secondary) == boot_serial_active_image.flash_dev_id &&
+        flash_area_get_off(secondary) == boot_serial_active_image.image_off) {
+        rc = MGMT_ERR_EBUSY;
+        goto out;
+    }
+
+    /* Include the trailer so no pending or confirmed state survives erase. */
+    rc = boot_scramble_region(secondary, 0, flash_area_get_size(secondary), false);
+    rc = rc == 0 ? MGMT_ERR_OK : MGMT_ERR_EUNKNOWN;
+
+out:
+    if (secondary != NULL) {
+        flash_area_close(secondary);
+    }
+    if (primary != NULL) {
+        flash_area_close(primary);
+    }
+    bs_rc_rsp(rc);
+}
+#endif
+
 static void
 bs_list_set(uint8_t op, char *buf, int len)
 {
@@ -1425,6 +1500,15 @@ boot_serial_input(char *buf, int len)
         case IMGMGR_NMGR_ID_UPLOAD:
             bs_upload(buf, len);
             break;
+#ifdef MCUBOOT_SERIAL_IMG_GRP_IMAGE_ERASE
+        case IMGMGR_NMGR_ID_ERASE:
+            if (ntohs(hdr->nh_len) != len) {
+                bs_rc_rsp(MGMT_ERR_EINVAL);
+                break;
+            }
+            bs_erase(hdr->nh_op, buf, len);
+            break;
+#endif
 #ifdef MCUBOOT_SERIAL_IMG_GRP_SLOT_INFO
         case IMGMGR_NMGR_ID_SLOT_INFO:
             bs_slot_info(hdr->nh_op, buf, len);

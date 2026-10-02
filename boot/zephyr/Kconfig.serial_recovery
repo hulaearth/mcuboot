@@ -347,6 +347,17 @@ config BOOT_SERIAL_IMG_GRP_IMAGE_STATE
 	  If y, image states will be included with image lists and the set
 	  state command can be used to mark an image as test/confirmed.
 
+config BOOT_SERIAL_IMG_GRP_IMAGE_ERASE
+	bool "Inactive secondary image erase"
+	depends on !SINGLE_APPLICATION_SLOT && !SINGLE_APPLICATION_SLOT_RAM_LOAD
+	depends on UPDATEABLE_IMAGE_NUMBER = 1
+	help
+	  Support the standard image erase command for slot 1, including its
+	  trailer. Only the secondary slot can be erased, and only after
+	  successful boot selection of the primary image. Serial recovery
+	  entered before boot selection, or after selection of the secondary
+	  image, refuses erase. Omitting the slot field selects slot 1.
+
 config BOOT_SERIAL_IMG_GRP_SLOT_INFO
 	bool "Slot info"
 	default y if UPDATEABLE_IMAGE_NUMBER > 1
