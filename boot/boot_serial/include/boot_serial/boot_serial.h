@@ -21,6 +21,7 @@
 #define __BOOT_SERIAL_H__
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,16 @@ struct boot_uart_funcs {
     int (*read)(char *str, int cnt, int *newline);
     void (*write)(const char *ptr, int cnt);
 };
+
+/**
+ * Record the flash image selected by a successful boot_go() call.
+ *
+ * Serial recovery uses this identity for RAM-load-with-revert state reporting
+ * and inactive-image erase. It identifies the boot selection, not an image
+ * already running. Call only after boot_go() succeeds; before then serial
+ * recovery has no known active image.
+ */
+void boot_serial_set_active_image(uint8_t flash_dev_id, uint32_t image_off);
 
 /**
  * Start processing newtmgr commands for uploading image0 over serial.
