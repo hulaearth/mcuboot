@@ -296,6 +296,67 @@ int invoke_boot_go(struct sim_context *ctx, struct area_desc *adesc,
     }
 }
 
+/* Simulated flash supports reads, but is not memory mapped. */
+int flash_device_base(uint8_t fd_id, uintptr_t *ret)
+{
+    (void)fd_id;
+    (void)ret;
+    return -ENOTSUP;
+}
+
+#ifdef MCUBOOT_RAM_LOAD
+/* Validate an already loaded image, optionally corrupting only its RAM copy. */
+int invoke_validate_image_source(struct sim_context *ctx, struct area_desc *adesc,
+                                 int use_flash, int corrupt_ram)
+{
+    struct boot_loader_state *state = malloc(sizeof(*state));
+    const struct flash_area *fap;
+    struct image_header hdr;
+    enum bootutil_data_source previous, restored;
+    uint8_t tmp_buf[256];
+    uint8_t *payload = NULL;
+    FIH_DECLARE(valid, FIH_FAILURE);
+    int rc;
+
+    sim_set_flash_areas(adesc);
+    sim_set_context(ctx);
+    boot_state_init(state);
+    rc = flash_area_open(FLASH_AREA_IMAGE_PRIMARY(0), &fap);
+    if (rc != 0) {
+        goto out;
+    }
+    rc = boot_image_load_header(fap, &hdr);
+    if (rc != 0) {
+        goto close;
+    }
+
+    previous = bootutil_data_source_set(use_flash ? BOOTUTIL_DATA_SOURCE_FLASH :
+                                                   BOOTUTIL_DATA_SOURCE_RAM);
+    if (corrupt_ram) {
+        payload = (uint8_t *)(IMAGE_RAM_BASE + hdr.ih_load_addr + hdr.ih_hdr_size);
+        *payload ^= 1;
+    }
+    FIH_CALL(bootutil_img_validate, valid, state, &hdr, fap,
+             tmp_buf, sizeof(tmp_buf), NULL, 0, NULL);
+    rc = FIH_EQ(valid, FIH_SUCCESS) ? 0 : -1;
+    if (payload != NULL) {
+        *payload ^= 1;
+    }
+    bootutil_data_source_set(previous);
+    if (bootutil_data_source_get(&restored) != 0 || restored != previous) {
+        rc = -2;
+    }
+close:
+    flash_area_close(fap);
+out:
+    boot_state_clear(state);
+    free(state);
+    sim_reset_flash_areas();
+    sim_reset_context();
+    return rc;
+}
+#endif
+
 int invoke_boot_load_image_from_flash_to_sram(struct sim_context *ctx, struct area_desc *adesc)
 {
 #ifdef MCUBOOT_RAM_LOAD

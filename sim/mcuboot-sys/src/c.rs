@@ -127,6 +127,25 @@ pub fn boot_go(multiflash: &mut SimMultiFlash, areadesc: &AreaDesc,
     }
 }
 
+/// Validate the existing image against its RAM or flash copy.
+#[cfg(feature = "ram-load")]
+pub fn validate_image_source(multiflash: &mut SimMultiFlash, areadesc: &AreaDesc,
+                             use_flash: bool, corrupt_ram: bool) -> i32 {
+    for (&dev_id, flash) in multiflash.iter_mut() {
+        api::set_flash(dev_id, flash);
+    }
+    let mut sim_ctx = api::CSimContext::default();
+    let result = unsafe {
+        let adesc = areadesc.get_c();
+        raw::invoke_validate_image_source(&mut sim_ctx, adesc.borrow() as *const _,
+                                          use_flash as i32, corrupt_ram as i32)
+    };
+    for &dev_id in multiflash.keys() {
+        api::clear_flash(dev_id);
+    }
+    result
+}
+
 pub fn boot_load_image_from_flash_to_sram(multiflash: &mut SimMultiFlash, areadesc: &AreaDesc) -> bool {
     init_crypto();
 
@@ -221,6 +240,11 @@ mod raw {
         // for information and tracking.
         pub fn invoke_boot_go(sim_ctx: *mut CSimContext, areadesc: *const CAreaDesc,
             rsp: *mut BootRsp, image_index: libc::c_int) -> libc::c_int;
+
+        #[cfg(feature = "ram-load")]
+        pub fn invoke_validate_image_source(sim_ctx: *mut CSimContext,
+                                             areadesc: *const CAreaDesc,
+                                             use_flash: i32, corrupt_ram: i32) -> i32;
 
         pub fn invoke_boot_load_image_from_flash_to_sram(sim_ctx: *mut CSimContext,
             areadesc: *const CAreaDesc) -> libc::c_int;
