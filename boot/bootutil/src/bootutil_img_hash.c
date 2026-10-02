@@ -65,6 +65,11 @@ bootutil_img_hash(struct boot_loader_state *state,
     uintptr_t base = 0;
     int fa_ret;
 #endif
+#ifdef MCUBOOT_RAM_LOAD
+    enum bootutil_data_source data_source;
+    const void *image_data;
+    int source_rc;
+#endif
 #if defined(MCUBOOT_ENC_IMAGES)
     int image_index;
 #endif
@@ -77,14 +82,6 @@ bootutil_img_hash(struct boot_loader_state *state,
     (void)hdr_size;
     (void)blk_off;
     (void)tlv_off;
-#ifdef MCUBOOT_RAM_LOAD
-    (void)blk_sz;
-    (void)off;
-    (void)rc;
-    (void)fap;
-    (void)tmp_buf;
-    (void)tmp_buf_sz;
-#endif
 #endif
     BOOT_LOG_DBG("bootutil_img_hash");
 
@@ -142,6 +139,22 @@ bootutil_img_hash(struct boot_loader_state *state,
         bootutil_sha_update(&sha_ctx, seed, seed_len);
     }
 
+#ifdef MCUBOOT_RAM_LOAD
+    source_rc = bootutil_data_source_get(&data_source);
+    if (source_rc != 0) {
+        bootutil_sha_drop(&sha_ctx);
+        return source_rc;
+    }
+    if (data_source == BOOTUTIL_DATA_SOURCE_RAM) {
+        source_rc = bootutil_get_image_data_address(hdr, fap, 0, &image_data);
+        if (source_rc != 0) {
+            bootutil_sha_drop(&sha_ctx);
+            return source_rc;
+        }
+        bootutil_sha_update(&sha_ctx, image_data, size);
+        goto finish_hash;
+    }
+#endif
 #ifdef MCUBOOT_HASH_STORAGE_DIRECTLY
     /* No chunk loading, storage is mapped to address space and can
      * be directly given to hashing function.
@@ -153,11 +166,6 @@ bootutil_img_hash(struct boot_loader_state *state,
 
     bootutil_sha_update(&sha_ctx, (void *)(base + flash_area_get_off(fap)), size);
 #else /* MCUBOOT_HASH_STORAGE_DIRECTLY */
-#ifdef MCUBOOT_RAM_LOAD
-    bootutil_sha_update(&sha_ctx,
-                        (void*)(IMAGE_RAM_BASE + hdr->ih_load_addr),
-                        size);
-#else
     for (off = 0; off < size; off += blk_sz) {
         blk_sz = size - off;
         if (blk_sz > tmp_buf_sz) {
@@ -205,8 +213,10 @@ bootutil_img_hash(struct boot_loader_state *state,
 
         MCUBOOT_WATCHDOG_FEED();
     }
-#endif /* MCUBOOT_RAM_LOAD */
 #endif /* MCUBOOT_HASH_STORAGE_DIRECTLY */
+#ifdef MCUBOOT_RAM_LOAD
+finish_hash:
+#endif
     bootutil_sha_finish(&sha_ctx, hash_result);
     bootutil_sha_drop(&sha_ctx);
 

@@ -666,6 +666,11 @@ bs_list_set(uint8_t op, char *buf, int len)
     int rc;
     struct boot_loader_state *state;
     bool area_opened = false;
+#ifdef MCUBOOT_RAM_LOAD
+    enum bootutil_data_source previous_data_source;
+
+    previous_data_source = bootutil_data_source_set(BOOTUTIL_DATA_SOURCE_FLASH);
+#endif
 
     state = boot_get_loader_state();
     boot_state_init(state);
@@ -705,6 +710,9 @@ out:
         boot_close_all_flash_areas(state);
     }
     boot_state_clear(state);
+#ifdef MCUBOOT_RAM_LOAD
+    bootutil_data_source_set(previous_data_source);
+#endif
 
     if (rc != 0) {
         bs_rc_rsp(rc);

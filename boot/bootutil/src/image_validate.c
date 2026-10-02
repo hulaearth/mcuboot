@@ -55,6 +55,90 @@ BOOT_LOG_MODULE_DECLARE(mcuboot);
 #endif
 #include "bootutil_priv.h"
 
+#ifdef MCUBOOT_RAM_LOAD
+/* Reject a damaged selector rather than authenticating the wrong copy. */
+struct bootutil_data_source_state {
+    uint32_t value;
+    uint32_t inverse;
+};
+
+#ifdef __BOOTSIM__
+static _Thread_local struct bootutil_data_source_state validation_data_source = {
+#else
+static struct bootutil_data_source_state validation_data_source = {
+#endif
+    BOOTUTIL_DATA_SOURCE_RAM,
+    ~((uint32_t)BOOTUTIL_DATA_SOURCE_RAM),
+};
+
+int
+bootutil_data_source_get(enum bootutil_data_source *source)
+{
+    uint32_t value = validation_data_source.value;
+
+    if (value != ~validation_data_source.inverse ||
+        (value != BOOTUTIL_DATA_SOURCE_RAM && value != BOOTUTIL_DATA_SOURCE_FLASH)) {
+        return -EINVAL;
+    }
+    *source = (enum bootutil_data_source)value;
+    return 0;
+}
+
+enum bootutil_data_source
+bootutil_data_source_set(enum bootutil_data_source source)
+{
+    enum bootutil_data_source previous;
+
+    if (bootutil_data_source_get(&previous) != 0 ||
+        (source != BOOTUTIL_DATA_SOURCE_RAM && source != BOOTUTIL_DATA_SOURCE_FLASH)) {
+        FIH_PANIC;
+    }
+    validation_data_source.value = source;
+    validation_data_source.inverse = ~((uint32_t)source);
+    return previous;
+}
+
+int
+bootutil_load_image_data(const struct image_header *hdr, const struct flash_area *fap,
+                         uint32_t start, void *output, uint32_t size)
+{
+    enum bootutil_data_source source;
+
+    if (bootutil_data_source_get(&source) != 0) {
+        return -EINVAL;
+    }
+    if (source == BOOTUTIL_DATA_SOURCE_FLASH) {
+        return flash_area_read(fap, start, output, size);
+    }
+
+    memcpy(output, (void *)(IMAGE_RAM_BASE + hdr->ih_load_addr + start), size);
+    return 0;
+}
+
+int
+bootutil_get_image_data_address(const struct image_header *hdr, const struct flash_area *fap,
+                                uint32_t start, const void **address)
+{
+    enum bootutil_data_source source;
+    uintptr_t base;
+    int rc;
+
+    if (bootutil_data_source_get(&source) != 0) {
+        return -EINVAL;
+    }
+    if (source == BOOTUTIL_DATA_SOURCE_FLASH) {
+        rc = flash_device_base(flash_area_get_device_id(fap), &base);
+        if (rc != 0) {
+            return rc;
+        }
+        *address = (void *)(base + flash_area_get_off(fap) + start);
+    } else {
+        *address = (void *)(IMAGE_RAM_BASE + hdr->ih_load_addr + start);
+    }
+    return 0;
+}
+#endif
+
 /*
  * Currently, we only support being able to verify one type of
  * signature, because there is a single verification function that we
@@ -236,8 +320,11 @@ bootutil_img_validate(struct boot_loader_state *state,
 #endif
     int rc = 0;
     FIH_DECLARE(fih_rc, FIH_FAILURE);
-#if defined(MCUBOOT_SIGN_PURE)
+#ifdef MCUBOOT_SIGN_PURE
+    const void *image_data;
+#ifndef MCUBOOT_RAM_LOAD
     uintptr_t base = 0;
+#endif
 #endif
 #ifdef MCUBOOT_HW_ROLLBACK_PROT
     fih_int security_cnt = fih_int_encode(INT_MAX);
@@ -413,6 +500,12 @@ bootutil_img_validate(struct boot_loader_state *state,
             FIH_CALL(bootutil_verify_sig, valid_signature, hash, sizeof(hash),
                                                            buf, len, key_id);
 #else
+#ifdef MCUBOOT_RAM_LOAD
+            rc = bootutil_get_image_data_address(hdr, fap, 0, &image_data);
+            if (rc != 0) {
+                goto out;
+            }
+#else
             rc = flash_device_base(flash_area_get_device_id(fap), &base);
             if (rc != 0) {
                 goto out;
@@ -421,12 +514,13 @@ bootutil_img_validate(struct boot_loader_state *state,
 #if defined(MCUBOOT_SWAP_USING_OFFSET)
             base += boot_get_state_secondary_offset(state, fap);
 #endif
+            image_data = (void *)(base + flash_area_get_off(fap));
+#endif
 
-            /* Directly check signature on the image, by using the mapping of
-             * a device to memory. The pointer is beginning of image in flash,
-             * so offset of area, the range is header + image + protected tlvs.
+            /* A pure signature covers the selected image copy directly,
+             * including its header, payload and protected TLVs.
              */
-            FIH_CALL(bootutil_verify_sig, valid_signature, (void *)(base + flash_area_get_off(fap)),
+            FIH_CALL(bootutil_verify_sig, valid_signature, (void *)image_data,
                      hdr->ih_hdr_size + hdr->ih_img_size + hdr->ih_protect_tlv_size,
                      buf, len, key_id);
 #endif
