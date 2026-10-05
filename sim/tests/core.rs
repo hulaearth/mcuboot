@@ -83,6 +83,9 @@ sim_test!(ram_load_failed_validation, make_no_upgrade_image(&NO_DEPS, ImageManip
 #[cfg(not(feature = "check-load-addr"))]
 sim_test!(ram_load_corrupt_higher_version_image, make_no_upgrade_image(&NO_DEPS, ImageManipulation::CorruptHigherVersionImage), run_ram_load_boot_with_result(true));
 
+#[cfg(feature = "ram-load")]
+sim_test!(ram_load_validation_sources, make_no_upgrade_image(&NO_DEPS, ImageManipulation::None), run_validation_sources());
+
 sim_test!(hw_prot_missing_security_cnt, make_image_with_security_counter(None), run_hw_rollback_prot());
 sim_test!(hw_prot_failed_security_cnt_check, make_image_with_security_counter(Some(0)), run_hw_rollback_prot());
 

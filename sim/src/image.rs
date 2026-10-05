@@ -1580,6 +1580,23 @@ impl Images {
         return false;
     }
 
+    /// RAM-load validation must authenticate RAM, while serial recovery uses flash.
+    #[cfg(feature = "ram-load")]
+    pub fn run_validation_sources(&self) -> bool {
+        let mut flash = self.flash.clone();
+        let ram = RamBlock::new(self.ram.total - RAM_LOAD_ADDR, RAM_LOAD_ADDR);
+        ram.invoke(|| {
+            assert!(c::boot_go(&mut flash, &self.areadesc, None, None, true).success());
+            assert_eq!(c::validate_image_source(&mut flash, &self.areadesc, false, false), 0);
+            // Valid flash cannot conceal a change to the RAM copy being executed.
+            assert_eq!(c::validate_image_source(&mut flash, &self.areadesc, false, true), -1);
+            // Serial image listing must work even when RAM contains stale data.
+            assert_eq!(c::validate_image_source(&mut flash, &self.areadesc, true, true), 0);
+            assert_eq!(c::validate_image_source(&mut flash, &self.areadesc, false, false), 0);
+        });
+        false
+    }
+
     /// Test the split ram-loading.
     pub fn run_split_ram_load(&self) -> bool {
         if !Caps::RamLoad.present() {

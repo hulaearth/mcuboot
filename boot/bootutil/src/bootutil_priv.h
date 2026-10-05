@@ -593,9 +593,21 @@ struct bootsim_ram_info *bootsim_get_ram_info(void);
 #       define IMAGE_RAM_BASE ((uintptr_t)0)
 #   endif
 
-#define LOAD_IMAGE_DATA(hdr, fap, start, output, size)       \
-    (memcpy((output),(void*)(IMAGE_RAM_BASE + (hdr)->ih_load_addr + (start)), \
-    (size)), 0)
+/* RAM-load boots validate the copied image; serial recovery validates flash. */
+enum bootutil_data_source {
+    BOOTUTIL_DATA_SOURCE_RAM,
+    BOOTUTIL_DATA_SOURCE_FLASH,
+};
+
+int bootutil_data_source_get(enum bootutil_data_source *source);
+enum bootutil_data_source bootutil_data_source_set(enum bootutil_data_source source);
+int bootutil_load_image_data(const struct image_header *hdr, const struct flash_area *fap,
+                             uint32_t start, void *output, uint32_t size);
+int bootutil_get_image_data_address(const struct image_header *hdr, const struct flash_area *fap,
+                                    uint32_t start, const void **address);
+
+#define LOAD_IMAGE_DATA(hdr, fap, start, output, size) \
+    bootutil_load_image_data((hdr), (fap), (start), (output), (size))
 
 int boot_load_image_to_sram(struct boot_loader_state *state);
 #else
