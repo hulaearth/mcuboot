@@ -102,6 +102,18 @@ BOOT_LOG_MODULE_DECLARE(mcuboot);
 #define MCUBOOT_SERIAL_MAX_RECEIVE_SIZE 512
 #endif
 
+#ifdef MCUBOOT_SERIAL_FLASH_WRITE_ALIGNMENT
+#if MCUBOOT_SERIAL_FLASH_WRITE_ALIGNMENT <= 0 || \
+    (MCUBOOT_SERIAL_FLASH_WRITE_ALIGNMENT & (MCUBOOT_SERIAL_FLASH_WRITE_ALIGNMENT - 1)) != 0
+#error "MCUBOOT_SERIAL_FLASH_WRITE_ALIGNMENT must be a positive power of two"
+#elif MCUBOOT_SERIAL_FLASH_WRITE_ALIGNMENT > BOOT_MAX_ALIGN
+#error "MCUBOOT_SERIAL_FLASH_WRITE_ALIGNMENT exceeds BOOT_MAX_ALIGN"
+#elif defined(MCUBOOT_SERIAL_UNALIGNED_BUFFER_SIZE) && MCUBOOT_SERIAL_UNALIGNED_BUFFER_SIZE > 0 && \
+    (MCUBOOT_SERIAL_UNALIGNED_BUFFER_SIZE % MCUBOOT_SERIAL_FLASH_WRITE_ALIGNMENT) != 0
+#error "MCUBOOT_SERIAL_UNALIGNED_BUFFER_SIZE must preserve the serial write alignment"
+#endif
+#endif
+
 #ifdef MCUBOOT_SERIAL_IMG_GRP_IMAGE_STATE
 #define BOOT_SERIAL_IMAGE_STATE_SIZE_MAX 48
 #else
@@ -917,6 +929,7 @@ bs_upload(char *buf, int len)
     static uint32_t img_num = 0;
     size_t img_size_tmp = SIZE_MAX;     /* Temp variable for image size */
     const struct flash_area *fap = NULL;
+    size_t write_alignment;
     int rc;
     struct zcbor_string img_chunk_data = { 0 };
     size_t decoded = 0;
@@ -998,6 +1011,28 @@ bs_upload(char *buf, int len)
         goto out;
     }
 
+    write_alignment = flash_area_align(fap);
+    if (write_alignment == 0 || write_alignment > BOOT_MAX_ALIGN ||
+        (write_alignment & (write_alignment - 1)) != 0) {
+        rc = MGMT_ERR_EINVAL;
+        goto out;
+    }
+#ifdef MCUBOOT_SERIAL_FLASH_WRITE_ALIGNMENT
+    if (write_alignment < MCUBOOT_SERIAL_FLASH_WRITE_ALIGNMENT) {
+        write_alignment = MCUBOOT_SERIAL_FLASH_WRITE_ALIGNMENT;
+    }
+#endif
+#if defined(MCUBOOT_SERIAL_UNALIGNED_BUFFER_SIZE) && MCUBOOT_SERIAL_UNALIGNED_BUFFER_SIZE > 0
+    if (MCUBOOT_SERIAL_UNALIGNED_BUFFER_SIZE % write_alignment != 0) {
+        rc = MGMT_ERR_EINVAL;
+        goto out;
+    }
+#endif
+    if (img_chunk_off % write_alignment != 0) {
+        rc = MGMT_ERR_EINVAL;
+        goto out;
+    }
+
     if (img_chunk_off == 0) {
         /* Receiving chunk with 0 offset resets the upload state; this basically
          * means that upload has started from beginning.
@@ -1005,6 +1040,9 @@ bs_upload(char *buf, int len)
         const size_t area_size = flash_area_get_size(fap);
 
         curr_off = 0;
+        if (img_chunk_len > img_size_tmp) {
+            goto out_invalid_data;
+        }
 #if defined(MCUBOOT_ERASE_PROGRESSIVELY) && defined(BOOT_IMAGE_HAS_STATUS_FIELDS)
         /* Get trailer sector information; this is done early because inability to get
          * that sector information means that upload will not work anyway.
@@ -1022,11 +1060,12 @@ bs_upload(char *buf, int len)
         /* We are using swap state at end of flash area to store validation
          * result. Make sure the user cannot write it from an image to skip validation.
          */
-        if (img_size_tmp > (area_size - BOOT_MAGIC_SZ)) {
+        if (img_size_tmp > (area_size - BOOT_MAGIC_SZ) -
+                           (area_size - BOOT_MAGIC_SZ) % write_alignment) {
             goto out_invalid_data;
         }
 #else
-        if (img_size_tmp > area_size) {
+        if (img_size_tmp > area_size - area_size % write_alignment) {
             goto out_invalid_data;
         }
 
@@ -1085,6 +1124,15 @@ bs_upload(char *buf, int len)
         goto out;
     }
 
+#ifdef MCUBOOT_SWAP_USING_OFFSET
+    if (start_off % write_alignment != 0 || start_off > flash_area_get_size(fap) ||
+        img_size > flash_area_get_size(fap) -
+                   flash_area_get_size(fap) % write_alignment - start_off) {
+        rc = MGMT_ERR_EINVAL;
+        goto out;
+    }
+#endif
+
 #ifdef MCUBOOT_ERASE_PROGRESSIVELY
     /* Progressive erase will erase enough flash, aligned to sector size,
      * as needed for the current chunk to be written.
@@ -1108,7 +1156,7 @@ bs_upload(char *buf, int len)
      * new buffer by responding with request for offset after the last aligned
      * write.
      */
-    rem_bytes = img_chunk_len % flash_area_align(fap);
+    rem_bytes = img_chunk_len % write_alignment;
     img_chunk_len -= rem_bytes;
 
     if (curr_off + img_chunk_len + rem_bytes < img_size) {
@@ -1118,13 +1166,13 @@ bs_upload(char *buf, int len)
     BOOT_LOG_DBG("Writing at 0x%x until 0x%x", curr_off, curr_off + (uint32_t)img_chunk_len);
     /* Write flash aligned chunk, note that img_chunk_len now holds aligned length */
 #if defined(MCUBOOT_SERIAL_UNALIGNED_BUFFER_SIZE) && MCUBOOT_SERIAL_UNALIGNED_BUFFER_SIZE > 0
-    if (flash_area_align(fap) > 1 &&
-        (((size_t)img_chunk) & (flash_area_align(fap) - 1)) != 0) {
+    if (write_alignment > 1 && ((uintptr_t)img_chunk % write_alignment) != 0) {
         /* Buffer address incompatible with write address, use buffer to write */
         size_t write_size = MCUBOOT_SERIAL_UNALIGNED_BUFFER_SIZE;
-        uint8_t wbs_aligned[MCUBOOT_SERIAL_UNALIGNED_BUFFER_SIZE];
+        uint8_t wbs_aligned[MCUBOOT_SERIAL_UNALIGNED_BUFFER_SIZE]
+            __attribute__((aligned(BOOT_MAX_ALIGN)));
 
-        while (img_chunk_len >= flash_area_align(fap)) {
+        while (img_chunk_len >= write_alignment) {
             if (write_size > img_chunk_len) {
                 write_size = img_chunk_len;
             }
@@ -1166,17 +1214,17 @@ bs_upload(char *buf, int len)
          * part, in the img_chunk_len - rem_bytes count bytes, has already been
          * written by the above write, so we are left with the rem_bytes.
          */
-        uint8_t wbs_aligned[BOOT_MAX_ALIGN];
+        uint8_t wbs_aligned[BOOT_MAX_ALIGN] __attribute__((aligned(BOOT_MAX_ALIGN)));
 
         memset(wbs_aligned, flash_area_erased_val(fap), sizeof(wbs_aligned));
         memcpy(wbs_aligned, img_chunk + img_chunk_len, rem_bytes);
 
 #ifdef MCUBOOT_SWAP_USING_OFFSET
         rc = flash_area_write(fap, curr_off + img_chunk_len + start_off, wbs_aligned,
-                              flash_area_align(fap));
+                              write_alignment);
 #else
         rc = flash_area_write(fap, curr_off + img_chunk_len, wbs_aligned,
-                              flash_area_align(fap));
+                              write_alignment);
 #endif
     }
 

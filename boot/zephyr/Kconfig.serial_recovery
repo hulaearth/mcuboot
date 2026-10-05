@@ -156,6 +156,18 @@ config BOOT_SERIAL_UNALIGNED_BUFFER_SIZE
 	  memory access when data is written to a device with memory alignment
 	  requirements. Set to 0 to disable.
 
+config BOOT_SERIAL_FLASH_WRITE_ALIGNMENT
+	int "Minimum flash write alignment for serial upload"
+	default 0
+	range 0 32
+	help
+	  Require serial upload writes to use at least this alignment when a
+	  flash transfer path needs more alignment than the driver reports.
+	  Use a power of two no larger than BOOT_MAX_ALIGN. This affects serial
+	  upload only; it does not change the flash driver contract or the
+	  alignment used by other MCUboot writes. Set to 0 to use the driver
+	  alignment.
+
 config BOOT_MAX_LINE_INPUT_LEN
 	int "Maximum input line length"
 	default 128
