@@ -342,6 +342,14 @@ int main(void)
     }
     BOOT_LOG_DBG("Left boot_go with success == %d", FIH_EQ(fih_rc, FIH_SUCCESS) ? 1 : 0);
 
+#if (defined(MCUBOOT_RAM_LOAD) && defined(MCUBOOT_RAM_LOAD_REVERT) && \
+     defined(MCUBOOT_SERIAL_IMG_GRP_IMAGE_STATE)) || \
+    defined(MCUBOOT_SERIAL_IMG_GRP_IMAGE_ERASE)
+    if (FIH_EQ(fih_rc, FIH_SUCCESS)) {
+        boot_serial_set_active_image(rsp.br_flash_dev_id, rsp.br_image_off);
+    }
+#endif
+
 #ifdef CONFIG_BOOT_SERIAL_BOOT_MODE
     if (io_detect_boot_mode()) {
         /* Boot mode to stay in bootloader, clear status and enter serial
