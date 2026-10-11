@@ -1283,7 +1283,8 @@ out:
 
     boot_serial_output();
 
-#ifdef MCUBOOT_ENC_IMAGES
+#if defined(MCUBOOT_ENC_IMAGES) && !defined(MCUBOOT_RAM_LOAD)
+    /* RAM-load decrypts while copying to RAM; retain encrypted flash data. */
     if (rc == 0 && fap != NULL) {
         /* Check if this upload was for the primary slot */
 #if !defined(MCUBOOT_SERIAL_DIRECT_IMAGE_UPLOAD)

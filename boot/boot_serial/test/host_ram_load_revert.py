@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 The MCUboot Contributors
-"""Compile actual serial state handlers with host flash/CBOR fixtures.
+"""Compile actual serial state and upload completion with host fixtures.
 
 Run with python3 boot/boot_serial/test/host_ram_load_revert.py.
 Crypto validation and transport are stubbed; simulator tests cover crypto.
@@ -194,3 +194,83 @@ with tempfile.TemporaryDirectory(prefix="mcuboot-serial-revert-") as directory:
     subprocess.run([os.environ.get("CC","gcc"),"-std=c11","-Wall","-Wextra",
                     "-Wno-unused-function","-Werror",str(source),"-o",str(binary)],check=True)
     subprocess.run([str(binary)],check=True)
+
+# Exercise the actual completion tail after the upload parser/write path.
+# The decryption fixture records an in-place payload change while retaining
+# the encrypted header flag, as boot_handle_enc_fw does. Crypto itself is
+# covered by the simulator; these cases check when finalization calls it.
+upload = serial.split("\nbs_upload(", 1)[1].split("\n#ifdef MCUBOOT_BOOT_MGMT_ECHO", 1)[0]
+upload_tail = upload.rsplit("\nout:\n", 1)[1].rstrip() + "\n"
+UPLOAD_PRELUDE = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+#define BOOT_IMAGE_NUMBER 1
+#define FLASH_AREA_IMAGE_PRIMARY(image) 0
+#define BOOT_LOG_DBG(...) (void)0
+struct flash_area { int id; bool encrypted_flag, ciphertext; };
+static int decrypt_calls, close_calls, outputs;
+static int cbor_state[1];
+static void zcbor_map_start_encode(int *s,int n) { (void)s;(void)n; }
+static void zcbor_map_end_encode(int *s,int n) { (void)s;(void)n; }
+static void zcbor_tstr_put_lit_cast(int *s,const char *k) { (void)s;(void)k; }
+static void zcbor_int32_put(int *s,int n) { (void)s;(void)n; }
+static void zcbor_uint32_put(int *s,uint32_t n) { (void)s;(void)n; }
+static void boot_serial_output(void) { ++outputs; }
+static int flash_area_id_from_multi_image_slot(int image,int slot)
+{ (void)slot;return image; }
+static int flash_area_id_from_direct_image(int image) { return image; }
+static int boot_handle_enc_fw(const struct flash_area *fa)
+{
+    struct flash_area *fixture=(struct flash_area *)fa;
+    ++decrypt_calls;
+    assert(fixture->encrypted_flag && fixture->ciphertext);
+    fixture->ciphertext=false;
+    return 0;
+}
+static void flash_area_close(const struct flash_area *fa) { (void)fa;++close_calls; }
+static void complete_upload(int rc,const struct flash_area *fap,
+                            int img_num,uint32_t curr_off,uint32_t img_size)
+{
+'''
+UPLOAD_MAIN = r'''
+int main(void)
+{
+    struct flash_area primary={0,true,true};
+    complete_upload(0,&primary,0,128,128);
+#if defined(MCUBOOT_ENC_IMAGES) && !defined(MCUBOOT_RAM_LOAD)
+    assert(decrypt_calls==1 && !primary.ciphertext);
+#else
+    assert(decrypt_calls==0 && primary.ciphertext);
+#endif
+    assert(primary.encrypted_flag && close_calls==1 && outputs==1);
+    int completed_decrypts=decrypt_calls;
+    primary.ciphertext=true;
+    complete_upload(0,&primary,0,64,128);
+    complete_upload(2,&primary,0,128,128);
+    complete_upload(0,NULL,0,128,128);
+    struct flash_area secondary={1,true,true};
+    complete_upload(0,&secondary,1,128,128);
+    assert(decrypt_calls==completed_decrypts && primary.ciphertext && secondary.ciphertext);
+    assert(close_calls==5 && outputs==5);
+}
+'''
+with tempfile.TemporaryDirectory(prefix="mcuboot-serial-upload-") as directory:
+    source = Path(directory)/"test.c"
+    binary = Path(directory)/"test"
+    source.write_text(UPLOAD_PRELUDE + upload_tail + UPLOAD_MAIN)
+    for encrypted, ram_load, direct_upload in (
+            (True, True, False), (True, True, True),
+            (True, False, False), (True, False, True), (False, True, False)):
+        definitions = []
+        for enabled, name in ((encrypted,"MCUBOOT_ENC_IMAGES"),
+                              (ram_load,"MCUBOOT_RAM_LOAD"),
+                              (direct_upload,"MCUBOOT_SERIAL_DIRECT_IMAGE_UPLOAD")):
+            if enabled:
+                definitions.append("-D" + name)
+        subprocess.run([os.environ.get("CC","gcc"),"-std=c11","-Wall","-Wextra",
+                        "-Wno-unused-function","-Wno-unused-parameter","-Werror",
+                        *definitions,str(source),"-o",str(binary)],check=True)
+        subprocess.run([str(binary)],check=True)
+    print("PASS: actual upload completion retains RAM-load ciphertext; non-RAM decryption unchanged")
