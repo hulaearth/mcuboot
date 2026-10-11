@@ -77,6 +77,26 @@
 
 BOOT_LOG_MODULE_DECLARE(mcuboot);
 
+#if defined(MCUBOOT_RAM_LOAD) && defined(MCUBOOT_RAM_LOAD_REVERT) && \
+    defined(MCUBOOT_SERIAL_IMG_GRP_IMAGE_STATE)
+/* boot_go() exposes the selected identity for one image in boot_rsp. */
+_Static_assert(BOOT_IMAGE_NUMBER == 1, "RAM-load-revert serial state requires one image");
+/* Keep the boot selection when serial recovery clears boot_loader_state. */
+static struct {
+    bool valid;
+    uint8_t flash_dev_id;
+    uint32_t image_off;
+} boot_serial_active_image;
+
+void
+boot_serial_set_active_image(uint8_t flash_dev_id, uint32_t image_off)
+{
+    boot_serial_active_image.valid = true;
+    boot_serial_active_image.flash_dev_id = flash_dev_id;
+    boot_serial_active_image.image_off = image_off;
+}
+#endif
+
 #if !(defined(MCUBOOT_SINGLE_APPLICATION_SLOT) || \
     defined(MCUBOOT_FIRMWARE_LOADER) ||           \
     defined(MCUBOOT_SINGLE_APPLICATION_SLOT_RAM_LOAD))
@@ -311,7 +331,9 @@ bs_list(struct boot_loader_state *state, char *buf, int len)
     zcbor_list_start_encode(cbor_state, 5);
 
     IMAGES_ITER(BOOT_CURR_IMG(state)) {
-#if defined(MCUBOOT_SERIAL_IMG_GRP_IMAGE_STATE) || defined(MCUBOOT_SWAP_USING_OFFSET)
+#if (defined(MCUBOOT_SERIAL_IMG_GRP_IMAGE_STATE) && \
+     !(defined(MCUBOOT_RAM_LOAD) && defined(MCUBOOT_RAM_LOAD_REVERT))) || \
+    defined(MCUBOOT_SWAP_USING_OFFSET)
         int swap_status = boot_swap_type_multi(BOOT_CURR_IMG(state));
 #endif
         image_index = BOOT_CURR_IMG(state);
@@ -400,6 +422,16 @@ bs_list(struct boot_loader_state *state, char *buf, int len)
                 continue;
             }
 
+#if defined(MCUBOOT_SERIAL_IMG_GRP_IMAGE_STATE) && defined(MCUBOOT_RAM_LOAD) && \
+    defined(MCUBOOT_RAM_LOAD_REVERT)
+            struct boot_swap_state slot_state;
+
+            rc = boot_read_swap_state(fap, &slot_state);
+            if (rc != 0) {
+                continue;
+            }
+#endif
+
 #ifdef MCUBOOT_SERIAL_IMG_GRP_HASH
             /* Retrieve hash of image for identification */
 #ifdef MCUBOOT_SWAP_USING_OFFSET
@@ -417,6 +449,13 @@ bs_list(struct boot_loader_state *state, char *buf, int len)
 #endif
 
 #ifdef MCUBOOT_SERIAL_IMG_GRP_IMAGE_STATE
+#if defined(MCUBOOT_RAM_LOAD) && defined(MCUBOOT_RAM_LOAD_REVERT)
+            active = boot_serial_active_image.valid &&
+                     flash_area_get_device_id(fap) == boot_serial_active_image.flash_dev_id &&
+                     flash_area_get_off(fap) == boot_serial_active_image.image_off;
+            confirmed = slot_state.image_ok == BOOT_FLAG_SET;
+            pending = slot_state.magic == BOOT_MAGIC_GOOD && !confirmed;
+#else
             if (swap_status == BOOT_SWAP_TYPE_NONE) {
                 if (slot == BOOT_SLOT_PRIMARY) {
                     confirmed = true;
@@ -442,6 +481,7 @@ bs_list(struct boot_loader_state *state, char *buf, int len)
                     confirmed = true;
                 }
             }
+#endif
 
             if (!(hdr.ih_flags & IMAGE_F_NON_BOOTABLE)) {
                 zcbor_tstr_put_lit_cast(cbor_state, "bootable");
@@ -506,7 +546,7 @@ bs_set(struct boot_loader_state *state, char *buf, int len)
      *   "hash":<hash of image (OPTIONAL for single image only)>
      * }
      */
-    uint32_t slot;
+    uint32_t slot = BOOT_SLOT_SECONDARY;
     uint8_t image_index = 0;
     size_t decoded = 0;
     uint8_t hash[IMAGE_HASH_SIZE];
@@ -643,7 +683,18 @@ bs_set(struct boot_loader_state *state, char *buf, int len)
 #endif
 
 set_image_state:
+#if defined(MCUBOOT_RAM_LOAD) && defined(MCUBOOT_RAM_LOAD_REVERT)
+    /* Both slots can boot without swapping. A hash selects the requested slot;
+     * hashless single-image requests retain the secondary-slot default.
+     */
+    rc = boot_set_next(BOOT_IMG_AREA(state, slot), false, confirm);
+    if (rc == 0 && confirm) {
+        /* Confirm a slot whose magic was already written by a test request. */
+        rc = boot_set_next(BOOT_IMG_AREA(state, slot), true, true);
+    }
+#else
     rc = boot_set_pending_multi(image_index, confirm);
+#endif
 
 out:
     if (rc == 0) {
