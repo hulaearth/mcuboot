@@ -365,7 +365,11 @@ bs_list(struct boot_loader_state *state, char *buf, int len)
                 {
 #if defined(MCUBOOT_ENC_IMAGES)
 #if !defined(MCUBOOT_SINGLE_APPLICATION_SLOT)
+#ifdef MCUBOOT_RAM_LOAD
+                    if (IS_ENCRYPTED(&hdr)) {
+#else
                     if (IS_ENCRYPTED(&hdr) && MUST_DECRYPT(fap, image_index, &hdr)) {
+#endif
                         FIH_CALL(boot_image_validate_encrypted, fih_rc, state, fap,
                                  &hdr, tmpbuf, sizeof(tmpbuf));
                     } else {
@@ -379,7 +383,12 @@ bs_list(struct boot_loader_state *state, char *buf, int len)
                             hdr.ih_flags &= ~ENCRYPTIONFLAGS;
                         }
 #endif
-                        FIH_CALL(bootutil_img_validate, fih_rc, state, &hdr,
+#ifdef MCUBOOT_RAM_LOAD
+                        FIH_CALL(bootutil_img_validate_source, fih_rc, BOOTUTIL_DATA_SOURCE_FLASH,
+#else
+                        FIH_CALL(bootutil_img_validate, fih_rc,
+#endif
+                                 state, &hdr,
                                  fap, tmpbuf, sizeof(tmpbuf), NULL, 0, NULL);
 #if defined(MCUBOOT_ENC_IMAGES) && !defined(MCUBOOT_SINGLE_APPLICATION_SLOT)
                     }
@@ -591,7 +600,12 @@ bs_set(struct boot_loader_state *state, char *buf, int len)
                                      &hdr, tmpbuf, sizeof(tmpbuf));
                         } else {
 #endif
-                            FIH_CALL(bootutil_img_validate, fih_rc, state, &hdr,
+#ifdef MCUBOOT_RAM_LOAD
+                        FIH_CALL(bootutil_img_validate_source, fih_rc, BOOTUTIL_DATA_SOURCE_FLASH,
+#else
+                        FIH_CALL(bootutil_img_validate, fih_rc,
+#endif
+                                 state, &hdr,
                                      fap, tmpbuf, sizeof(tmpbuf), NULL, 0, NULL);
 #ifdef MCUBOOT_ENC_IMAGES
                         }
@@ -1833,7 +1847,7 @@ static int boot_serial_get_hash(const struct image_header *hdr,
     it.start_off = start_off;
 #endif
 
-    rc = bootutil_tlv_iter_begin(&it, hdr, fap, IMAGE_TLV_ANY, false);
+    rc = TLV_ITER_BEGIN_SOURCE(BOOTUTIL_DATA_SOURCE_FLASH, &it, hdr, fap, IMAGE_TLV_ANY, false);
     if (rc) {
         return -1;
     }

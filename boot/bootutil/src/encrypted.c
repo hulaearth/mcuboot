@@ -575,8 +575,20 @@ boot_decrypt_key(const uint8_t *buf, uint8_t *enckey)
 /*
  * Load encryption key.
  */
+#ifdef MCUBOOT_RAM_LOAD
+int
+boot_enc_load(struct boot_loader_state *state, int slot, const struct image_header *hdr,
+              const struct flash_area *fap, struct boot_status *bs)
+{
+    return boot_enc_load_source(BOOTUTIL_DATA_SOURCE_RAM, state, slot, hdr, fap, bs);
+}
+
+int
+boot_enc_load_source(enum bootutil_data_source source, struct boot_loader_state *state, int slot,
+#else
 int
 boot_enc_load(struct boot_loader_state *state, int slot,
+#endif
               const struct image_header *hdr, const struct flash_area *fap,
               struct boot_status *bs)
 {
@@ -606,7 +618,7 @@ boot_enc_load(struct boot_loader_state *state, int slot,
     it.start_off = boot_get_state_secondary_offset(state, fap);
 #endif
 
-    rc = bootutil_tlv_iter_begin(&it, hdr, fap, BOOT_ENC_TLV, false);
+    rc = TLV_ITER_BEGIN_SOURCE(source, &it, hdr, fap, BOOT_ENC_TLV, false);
     if (rc) {
         return -1;
     }
@@ -625,7 +637,7 @@ boot_enc_load(struct boot_loader_state *state, int slot,
     memset(buf, 0xff, BOOT_ENC_TLV_ALIGN_SIZE);
 #endif
 
-    rc = flash_area_read(fap, off, buf, BOOT_ENC_TLV_SIZE);
+    rc = LOAD_IMAGE_DATA_SOURCE(source, hdr, fap, off, buf, BOOT_ENC_TLV_SIZE);
     if (rc) {
         return -1;
     }

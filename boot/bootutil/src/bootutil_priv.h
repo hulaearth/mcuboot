@@ -593,9 +593,37 @@ struct bootsim_ram_info *bootsim_get_ram_info(void);
 #       define IMAGE_RAM_BASE ((uintptr_t)0)
 #   endif
 
-#define LOAD_IMAGE_DATA(hdr, fap, start, output, size)       \
-    (memcpy((output),(void*)(IMAGE_RAM_BASE + (hdr)->ih_load_addr + (start)), \
-    (size)), 0)
+/* Source-aware entry points are private to RAM-load validation/recovery. */
+#ifdef MCUBOOT_ENC_IMAGES
+int boot_enc_load_source(enum bootutil_data_source source, struct boot_loader_state *state,
+                         int slot, const struct image_header *hdr, const struct flash_area *fap,
+                         struct boot_status *bs);
+#endif
+int bootutil_load_image_data(enum bootutil_data_source source,
+                             const struct image_header *hdr, const struct flash_area *fap,
+                             uint32_t start, void *output, uint32_t size);
+int bootutil_get_image_data_address(enum bootutil_data_source source,
+                                    const struct image_header *hdr, const struct flash_area *fap,
+                                    uint32_t start, const void **address);
+int bootutil_img_hash_source(enum bootutil_data_source source, struct boot_loader_state *state,
+                             struct image_header *hdr, const struct flash_area *fap,
+                             uint8_t *tmp_buf, uint32_t tmp_buf_sz, uint8_t *hash_result,
+                             uint8_t *seed, int seed_len);
+fih_ret bootutil_img_validate_source(enum bootutil_data_source source,
+                                     struct boot_loader_state *state,
+                                     struct image_header *hdr, const struct flash_area *fap,
+                                     uint8_t *tmp_buf, uint32_t tmp_buf_sz, uint8_t *seed,
+                                     int seed_len, uint8_t *out_hash);
+int bootutil_tlv_iter_begin_source(enum bootutil_data_source source, struct image_tlv_iter *it,
+                                   const struct image_header *hdr, const struct flash_area *fap,
+                                   uint16_t type, bool prot);
+
+#define LOAD_IMAGE_DATA(hdr, fap, start, output, size) \
+    bootutil_load_image_data(BOOTUTIL_DATA_SOURCE_RAM, (hdr), (fap), (start), (output), (size))
+#define LOAD_IMAGE_DATA_SOURCE(source, hdr, fap, start, output, size) \
+    bootutil_load_image_data((source), (hdr), (fap), (start), (output), (size))
+#define TLV_ITER_BEGIN_SOURCE(source, it, hdr, fap, type, prot) \
+    bootutil_tlv_iter_begin_source((source), (it), (hdr), (fap), (type), (prot))
 
 int boot_load_image_to_sram(struct boot_loader_state *state);
 #else
@@ -604,6 +632,10 @@ int boot_load_image_to_sram(struct boot_loader_state *state);
 #define LOAD_IMAGE_DATA(hdr, fap, start, output, size)       \
     (flash_area_read((fap), (start), (output), (size)))
 
+#define LOAD_IMAGE_DATA_SOURCE(source, hdr, fap, start, output, size) \
+    LOAD_IMAGE_DATA((hdr), (fap), (start), (output), (size))
+#define TLV_ITER_BEGIN_SOURCE(source, it, hdr, fap, type, prot) \
+    bootutil_tlv_iter_begin((it), (hdr), (fap), (type), (prot))
 #endif /* MCUBOOT_RAM_LOAD */
 
 uint32_t bootutil_max_image_size(struct boot_loader_state *state, const struct flash_area *fap);

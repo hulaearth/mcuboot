@@ -212,9 +212,20 @@ fih_ret bootutil_img_validate(struct boot_loader_state *state,
                               uint8_t *seed, int seed_len, uint8_t *out_hash
 );
 
+#ifdef MCUBOOT_RAM_LOAD
+/* Distinct values reject accidental changes to the validation source. */
+enum bootutil_data_source {
+    BOOTUTIL_DATA_SOURCE_RAM = 0x35,
+    BOOTUTIL_DATA_SOURCE_FLASH = 0xca,
+};
+#endif
+
 struct image_tlv_iter {
     const struct image_header *hdr;
     const struct flash_area *fap;
+#ifdef MCUBOOT_RAM_LOAD
+    enum bootutil_data_source source;
+#endif
     uint16_t type;
     bool prot;
     uint32_t prot_end;

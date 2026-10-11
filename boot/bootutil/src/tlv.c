@@ -40,8 +40,21 @@ BOOT_LOG_MODULE_DECLARE(mcuboot);
  * @returns 0 if the TLV iterator was successfully started
  *          -1 on errors
  */
+#ifdef MCUBOOT_RAM_LOAD
 int
 bootutil_tlv_iter_begin(struct image_tlv_iter *it, const struct image_header *hdr,
+                        const struct flash_area *fap, uint16_t type, bool prot)
+{
+    return bootutil_tlv_iter_begin_source(BOOTUTIL_DATA_SOURCE_RAM, it, hdr, fap, type, prot);
+}
+
+int
+bootutil_tlv_iter_begin_source(enum bootutil_data_source source,
+                               struct image_tlv_iter *it, const struct image_header *hdr,
+#else
+int
+bootutil_tlv_iter_begin(struct image_tlv_iter *it, const struct image_header *hdr,
+#endif
                         const struct flash_area *fap, uint16_t type, bool prot)
 {
     uint32_t off_;
@@ -59,7 +72,7 @@ bootutil_tlv_iter_begin(struct image_tlv_iter *it, const struct image_header *hd
     off_ = BOOT_TLV_OFF(hdr);
 #endif
 
-    if (LOAD_IMAGE_DATA(hdr, fap, off_, &info, sizeof(info))) {
+    if (LOAD_IMAGE_DATA_SOURCE(source, hdr, fap, off_, &info, sizeof(info))) {
         return -1;
     }
 
@@ -68,7 +81,7 @@ bootutil_tlv_iter_begin(struct image_tlv_iter *it, const struct image_header *hd
             return -1;
         }
 
-        if (LOAD_IMAGE_DATA(hdr, fap, off_ + info.it_tlv_tot,
+        if (LOAD_IMAGE_DATA_SOURCE(source, hdr, fap, off_ + info.it_tlv_tot,
                             &info, sizeof(info))) {
             return -1;
         }
@@ -80,6 +93,9 @@ bootutil_tlv_iter_begin(struct image_tlv_iter *it, const struct image_header *hd
         return -1;
     }
 
+#ifdef MCUBOOT_RAM_LOAD
+    it->source = source;
+#endif
     it->hdr = hdr;
     it->fap = fap;
     it->type = type;
@@ -168,7 +184,7 @@ bootutil_tlv_iter_next(struct image_tlv_iter *it, uint32_t *off, uint16_t *len,
             return -1;
         }
 
-        rc = LOAD_IMAGE_DATA(it->hdr, it->fap, it->tlv_off, &tlv, sizeof tlv);
+        rc = LOAD_IMAGE_DATA_SOURCE(it->source, it->hdr, it->fap, it->tlv_off, &tlv, sizeof tlv);
         if (rc) {
             BOOT_LOG_DBG("bootutil_tlv_iter_next: load failed with %d for %p "
                          "%" PRIu32,
