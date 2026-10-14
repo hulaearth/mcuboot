@@ -54,6 +54,7 @@ BOOT_LOG_MODULE_DECLARE(mcuboot);
 #include "bootutil/enc_key.h"
 #endif
 #include "bootutil_priv.h"
+#include "bootutil/boot_timing.h"
 
 #ifdef MCUBOOT_RAM_LOAD
 int
@@ -325,12 +326,16 @@ bootutil_img_validate(struct boot_loader_state *state,
     BOOT_LOG_DBG("bootutil_img_validate: flash area %p", fap);
 
 #if defined(EXPECTED_HASH_TLV) && !defined(MCUBOOT_SIGN_PURE)
+    N6_BOOT_TIME_BEGIN(hash_start);
 #ifdef MCUBOOT_RAM_LOAD
     rc = bootutil_img_hash_source(source, state, hdr, fap, tmp_buf, tmp_buf_sz,
                                   hash, seed, seed_len);
 #else
     rc = bootutil_img_hash(state, hdr, fap, tmp_buf, tmp_buf_sz, hash, seed, seed_len);
 #endif
+    N6_BOOT_TIME_END("sha256", fap->fa_id,
+                     hdr->ih_hdr_size + hdr->ih_img_size + hdr->ih_protect_tlv_size,
+                     hash_start, rc);
     if (rc) {
         goto out;
     }
@@ -488,8 +493,11 @@ bootutil_img_validate(struct boot_loader_state *state,
                 goto out;
             }
 #ifndef MCUBOOT_SIGN_PURE
+            N6_BOOT_TIME_BEGIN(signature_start);
             FIH_CALL(bootutil_verify_sig, valid_signature, hash, sizeof(hash),
                                                            buf, len, key_id);
+            N6_BOOT_TIME_END("ecdsa_p256", fap->fa_id, sizeof(hash), signature_start,
+                             FIH_EQ(valid_signature, FIH_SUCCESS) ? 0 : -1);
 #else
 #ifdef MCUBOOT_RAM_LOAD
             rc = bootutil_get_image_data_address(source, hdr, fap, 0, &image_data);

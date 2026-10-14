@@ -63,6 +63,7 @@
 
 #include <bootutil/image.h>
 #include <bootutil/bootutil.h>
+#include <bootutil/boot_timing.h>
 
 #include "boot_serial/boot_serial.h"
 #include "boot_serial_priv.h"
@@ -1712,13 +1713,16 @@ boot_serial_read_console(const struct boot_uart_funcs *f,int timeout_in_ms)
 #endif
     int full_line;
     int max_input;
+#if defined(MCUBOOT_SERIAL_WAIT_FOR_DFU) && \
+    !defined(CONFIG_SOC_SERIES_STM32N6X)
     int elapsed_in_ms = 0;
-#ifdef MCUBOOT_SERIAL_WAIT_FOR_DFU
-    /* Start of the iteration charged against the timeout; rolled forward at
-     * the loop's end so every ms in the loop counts, not just f->read().
-     */
+    /* Charge each complete loop iteration against the timeout. */
     uint32_t start = k_uptime_get_32();
     uint32_t now;
+#endif
+#if defined(MCUBOOT_SERIAL_WAIT_FOR_DFU) && defined(CONFIG_SOC_SERIES_STM32N6X)
+    /* Use a monotonic 64-bit deadline to avoid uptime wrap on N6. */
+    int64_t deadline_ms = k_uptime_get() + timeout_in_ms;
 #endif
 #ifdef MCUBOOT_SERIAL_RAW_PROTOCOL_INPUT_TIMEOUT
     uint32_t raw_input_start = 0;
@@ -1811,15 +1815,23 @@ check_timeout:
 #endif
         /* Subtract elapsed time */
 #ifdef MCUBOOT_SERIAL_WAIT_FOR_DFU
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+        int64_t remaining_ms = deadline_ms - k_uptime_get();
+        timeout_in_ms = remaining_ms > 0 ? (int)remaining_ms : 0;
+#else
         now = k_uptime_get_32();
         elapsed_in_ms = (int)(now - start);
         start = now;
-#endif
         timeout_in_ms -= elapsed_in_ms;
+#endif
+#endif
 #ifdef MCUBOOT_SERIAL_INACTIVITY_TIMEOUT
         if (bs_rearm_pending) {
             bs_rearm_pending = false;
             timeout_in_ms = bs_rearm_ms;
+#if defined(MCUBOOT_SERIAL_WAIT_FOR_DFU) && defined(CONFIG_SOC_SERIES_STM32N6X)
+            deadline_ms = k_uptime_get() + bs_rearm_ms;
+#endif
         }
 #endif
     }
