@@ -128,7 +128,7 @@ static int64_t fake_ms;
 static uint32_t raw_clock;
 static int loop_overhead_ms;
 static int packet_count;
-static int read_step_ms;
+static int64_t read_step_ms;
 static int reads, last_packets[8];
 static bool add_overhead;
 static char stream_data[32];
@@ -152,6 +152,7 @@ static void boot_serial_input(const char *packet, int len)
 static int fake_read(char *buf, int size, int *full_line)
 {
     ++reads;
+    assert(reads <= 1000); /* Keep a broken deadline regression bounded. */
     fake_ms += read_step_ms;
     raw_clock += (uint32_t)read_step_ms;
     *full_line=0;
@@ -219,6 +220,12 @@ int main(void)
     reset(); fake_ms=INT64_C(5000000000); read_step_ms=INT32_MAX;
     boot_serial_read_console(&funcs,INT32_MAX);
     assert(reads==1); /* one slow empty read can expire the full interval */
+
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+    reset(); read_step_ms=INT64_C(5000000000);
+    boot_serial_read_console(&funcs,INT32_MAX);
+    assert(reads==1); /* the N6 deadline handles one gap greater than UINT32_MAX */
+#endif
 
     reset(); read_step_ms=1; add_overhead=true;
     char packet[6]; int packet_len=make_packet(packet,'a');
