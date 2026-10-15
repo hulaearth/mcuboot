@@ -28,6 +28,7 @@
 #include "io/io.h"
 #include "target.h"
 
+#include "bootutil/boot_timing.h"
 #include "bootutil/bootutil_log.h"
 #include "bootutil/image.h"
 #include "bootutil/bootutil.h"
@@ -231,6 +232,7 @@ int main(void)
     bool usb_dfu_forever = false;
 #endif
     FIH_DECLARE(fih_rc, FIH_FAILURE);
+    N6_BOOT_TIME_BEGIN(main_start);
 
     MCUBOOT_WATCHDOG_SETUP();
     MCUBOOT_WATCHDOG_FEED();
@@ -327,7 +329,9 @@ int main(void)
      * some time, so it's better to reuse thistime to already receive the
      * initial mcumgr command(s) into our buffers
      */
+    N6_BOOT_TIME_BEGIN(console_start);
     rc = boot_console_init();
+    N6_BOOT_TIME_END("recovery_console", -1, 0, console_start, rc);
     int timeout_in_ms = CONFIG_BOOT_SERIAL_WAIT_FOR_DFU_TIMEOUT;
     uint32_t start = k_uptime_get_32();
 
@@ -336,11 +340,21 @@ int main(void)
 #endif
 #endif
 
+    N6_BOOT_TIME_BEGIN(go_start);
     BOOT_HOOK_GO_CALL_FIH(boot_go_hook, FIH_BOOT_HOOK_REGULAR, fih_rc, &rsp);
     if (FIH_EQ(fih_rc, FIH_BOOT_HOOK_REGULAR)) {
         FIH_CALL(boot_go, fih_rc, &rsp);
     }
+    N6_BOOT_TIME_END("boot_go_total", -1, 0, go_start,
+                     FIH_EQ(fih_rc, FIH_SUCCESS) ? 0 : -1);
     BOOT_LOG_DBG("Left boot_go with success == %d", FIH_EQ(fih_rc, FIH_SUCCESS) ? 1 : 0);
+
+#if defined(MCUBOOT_RAM_LOAD) && defined(MCUBOOT_RAM_LOAD_REVERT) && \
+    defined(MCUBOOT_SERIAL_IMG_GRP_IMAGE_STATE)
+    if (FIH_EQ(fih_rc, FIH_SUCCESS)) {
+        boot_serial_set_active_image(rsp.br_flash_dev_id, rsp.br_image_off);
+    }
+#endif
 
 #ifdef CONFIG_BOOT_SERIAL_BOOT_MODE
     if (io_detect_boot_mode()) {
@@ -363,8 +377,11 @@ int main(void)
         timeout_in_ms = 1;
     }
 #ifdef MCUBOOT_SERIAL_INACTIVITY_TIMEOUT
-    if (boot_serial_start_inactivity(&boot_funcs, timeout_in_ms,
-                                     MCUBOOT_SERIAL_INACTIVITY_TIMEOUT)) {
+    N6_BOOT_TIME_BEGIN(wait_start);
+    bool recovery_rearmed = boot_serial_start_inactivity(
+        &boot_funcs, timeout_in_ms, MCUBOOT_SERIAL_INACTIVITY_TIMEOUT);
+    N6_BOOT_TIME_END("recovery_wait", -1, 0, wait_start, 0);
+    if (recovery_rearmed) {
         /* Reset rather than continue: boot_go() already selected an image
          * before this window opened, so continuing would boot whatever the
          * upload just replaced. A window with no command is not a session
@@ -379,7 +396,9 @@ int main(void)
         sys_reboot(SYS_REBOOT_COLD);
     }
 #else
+    N6_BOOT_TIME_BEGIN(wait_start);
     boot_serial_check_start(&boot_funcs,timeout_in_ms);
+    N6_BOOT_TIME_END("recovery_wait", -1, 0, wait_start, 0);
 #endif
 
 #ifdef CONFIG_MCUBOOT_INDICATION_LED
@@ -388,6 +407,8 @@ int main(void)
 #endif
 
     if (FIH_NOT_EQ(fih_rc, FIH_SUCCESS)) {
+        N6_BOOT_TIME_END("main_total", -1, 0, main_start, -1);
+        N6_BOOT_TIME_DUMP();
         BOOT_LOG_ERR("Unable to find bootable image");
 
         mcuboot_status_change(MCUBOOT_STATUS_NO_BOOTABLE_IMAGE_FOUND);
@@ -436,6 +457,8 @@ int main(void)
         FIH_PANIC;
     }
 
+    N6_BOOT_TIME_END("main_total", -1, 0, main_start, 0);
+    N6_BOOT_TIME_DUMP();
     ZEPHYR_BOOT_LOG_STOP();
 
     do_boot(&rsp);

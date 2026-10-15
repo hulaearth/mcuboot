@@ -30,18 +30,31 @@ boot_image_validate_encrypted(struct boot_loader_state *state,
     struct boot_status *bs = &_bs;
     int rc;
 
+#ifdef MCUBOOT_RAM_LOAD
+    if (IS_ENCRYPTED(hdr)) {
+        int slot = flash_area_id_to_multi_image_slot(BOOT_CURR_IMG(state),
+                                                    flash_area_get_id(fa_p));
+        rc = boot_enc_load_source(BOOTUTIL_DATA_SOURCE_FLASH, state, slot, hdr, fa_p, bs);
+#else
     if (MUST_DECRYPT(fa_p, BOOT_CURR_IMG(state), hdr)) {
-        rc = boot_enc_load(state, BOOT_SLOT_SECONDARY, hdr, fa_p, bs);
+        int slot = BOOT_SLOT_SECONDARY;
+        rc = boot_enc_load(state, slot, hdr, fa_p, bs);
+#endif
         if (rc < 0) {
             goto out;
         }
-        rc = boot_enc_set_key(BOOT_CURR_ENC_SLOT(state, BOOT_SLOT_SECONDARY), bs->enckey[BOOT_SLOT_SECONDARY]);
+        rc = boot_enc_set_key(BOOT_CURR_ENC_SLOT(state, slot), bs->enckey[slot]);
         if (rc < 0) {
             goto out;
         }
     }
 
-    FIH_CALL(bootutil_img_validate, fih_rc, state,
+#ifdef MCUBOOT_RAM_LOAD
+    FIH_CALL(bootutil_img_validate_source, fih_rc, BOOTUTIL_DATA_SOURCE_FLASH,
+#else
+    FIH_CALL(bootutil_img_validate, fih_rc,
+#endif
+             state,
              hdr, fa_p, buf, buf_size, NULL, 0, NULL);
 
 out:
@@ -247,7 +260,12 @@ decrypt_image_inplace(const struct flash_area *fa_p,
         }
 #endif
         /* Load the encryption keys into cache */
+#ifdef MCUBOOT_RAM_LOAD
+        rc = boot_enc_load_source(BOOTUTIL_DATA_SOURCE_FLASH, state, BOOT_SLOT_PRIMARY,
+                                  hdr, fa_p, bs);
+#else
         rc = boot_enc_load(state, BOOT_SLOT_PRIMARY, hdr, fa_p, bs);
+#endif
         if (rc < 0) {
             goto total_out;
         }

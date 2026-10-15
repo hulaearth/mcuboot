@@ -54,6 +54,48 @@ BOOT_LOG_MODULE_DECLARE(mcuboot);
 #include "bootutil/enc_key.h"
 #endif
 #include "bootutil_priv.h"
+#include "bootutil/boot_timing.h"
+
+#ifdef MCUBOOT_RAM_LOAD
+int
+bootutil_load_image_data(enum bootutil_data_source source,
+                         const struct image_header *hdr, const struct flash_area *fap,
+                         uint32_t start, void *output, uint32_t size)
+{
+    if (source != BOOTUTIL_DATA_SOURCE_RAM && source != BOOTUTIL_DATA_SOURCE_FLASH) {
+        return -EINVAL;
+    }
+    if (source == BOOTUTIL_DATA_SOURCE_FLASH) {
+        return flash_area_read(fap, start, output, size);
+    }
+
+    memcpy(output, (void *)(IMAGE_RAM_BASE + hdr->ih_load_addr + start), size);
+    return 0;
+}
+
+int
+bootutil_get_image_data_address(enum bootutil_data_source source,
+                                const struct image_header *hdr, const struct flash_area *fap,
+                                uint32_t start, const void **address)
+{
+    uintptr_t base;
+    int rc;
+
+    if (source != BOOTUTIL_DATA_SOURCE_RAM && source != BOOTUTIL_DATA_SOURCE_FLASH) {
+        return -EINVAL;
+    }
+    if (source == BOOTUTIL_DATA_SOURCE_FLASH) {
+        rc = flash_device_base(flash_area_get_device_id(fap), &base);
+        if (rc != 0) {
+            return rc;
+        }
+        *address = (void *)(base + flash_area_get_off(fap) + start);
+    } else {
+        *address = (void *)(IMAGE_RAM_BASE + hdr->ih_load_addr + start);
+    }
+    return 0;
+}
+#endif
 
 /*
  * Currently, we only support being able to verify one type of
@@ -123,7 +165,10 @@ BOOT_LOG_MODULE_DECLARE(mcuboot);
  *
  * Value of TLV does not matter, presence decides.
  */
-#if defined(MCUBOOT_SWAP_USING_OFFSET)
+#if defined(MCUBOOT_RAM_LOAD)
+static int bootutil_check_for_pure(enum bootutil_data_source source,
+                                  const struct image_header *hdr, const struct flash_area *fap)
+#elif defined(MCUBOOT_SWAP_USING_OFFSET)
 static int bootutil_check_for_pure(const struct image_header *hdr, const struct flash_area *fap,
                                    uint32_t start_off)
 #else
@@ -139,7 +184,7 @@ static int bootutil_check_for_pure(const struct image_header *hdr, const struct 
     it.start_off = start_off;
 #endif
 
-    rc = bootutil_tlv_iter_begin(&it, hdr, fap, IMAGE_TLV_SIG_PURE, false);
+    rc = TLV_ITER_BEGIN_SOURCE(source, &it, hdr, fap, IMAGE_TLV_SIG_PURE, false);
     if (rc) {
         return -1;
     }
@@ -149,7 +194,7 @@ static int bootutil_check_for_pure(const struct image_header *hdr, const struct 
     if (rc == 0 && len == 1) {
         uint8_t val;
 
-        rc = LOAD_IMAGE_DATA(hdr, fap, off, &val, sizeof(val));
+        rc = LOAD_IMAGE_DATA_SOURCE(source, hdr, fap, off, &val, sizeof(val));
         if (rc == 0) {
             return (val == 1) ? 0 : 1;
         } else {
@@ -197,8 +242,25 @@ static const uint16_t allowed_unprot_tlvs[] = {
  * Verify the integrity of the image.
  * Return non-zero if image could not be validated/does not validate.
  */
+#ifdef MCUBOOT_RAM_LOAD
+fih_ret
+bootutil_img_validate(struct boot_loader_state *state, struct image_header *hdr,
+                      const struct flash_area *fap, uint8_t *tmp_buf, uint32_t tmp_buf_sz,
+                      uint8_t *seed, int seed_len, uint8_t *out_hash)
+{
+    FIH_DECLARE(result, FIH_FAILURE);
+
+    FIH_CALL(bootutil_img_validate_source, result, BOOTUTIL_DATA_SOURCE_RAM,
+             state, hdr, fap, tmp_buf, tmp_buf_sz, seed, seed_len, out_hash);
+    FIH_RET(result);
+}
+
+fih_ret
+bootutil_img_validate_source(enum bootutil_data_source source, struct boot_loader_state *state,
+#else
 fih_ret
 bootutil_img_validate(struct boot_loader_state *state,
+#endif
                       struct image_header *hdr, const struct flash_area *fap,
                       uint8_t *tmp_buf, uint32_t tmp_buf_sz, uint8_t *seed,
                       int seed_len, uint8_t *out_hash
@@ -236,8 +298,11 @@ bootutil_img_validate(struct boot_loader_state *state,
 #endif
     int rc = 0;
     FIH_DECLARE(fih_rc, FIH_FAILURE);
-#if defined(MCUBOOT_SIGN_PURE)
+#ifdef MCUBOOT_SIGN_PURE
+    const void *image_data;
+#ifndef MCUBOOT_RAM_LOAD
     uintptr_t base = 0;
+#endif
 #endif
 #ifdef MCUBOOT_HW_ROLLBACK_PROT
     fih_int security_cnt = fih_int_encode(INT_MAX);
@@ -253,10 +318,24 @@ bootutil_img_validate(struct boot_loader_state *state,
     FIH_DECLARE(uuid_cid_valid, FIH_FAILURE);
 #endif
 
+#ifdef MCUBOOT_RAM_LOAD
+    if (source != BOOTUTIL_DATA_SOURCE_RAM && source != BOOTUTIL_DATA_SOURCE_FLASH) {
+        FIH_RET(FIH_FAILURE);
+    }
+#endif
     BOOT_LOG_DBG("bootutil_img_validate: flash area %p", fap);
 
 #if defined(EXPECTED_HASH_TLV) && !defined(MCUBOOT_SIGN_PURE)
+    N6_BOOT_TIME_BEGIN(hash_start);
+#ifdef MCUBOOT_RAM_LOAD
+    rc = bootutil_img_hash_source(source, state, hdr, fap, tmp_buf, tmp_buf_sz,
+                                  hash, seed, seed_len);
+#else
     rc = bootutil_img_hash(state, hdr, fap, tmp_buf, tmp_buf_sz, hash, seed, seed_len);
+#endif
+    N6_BOOT_TIME_END("sha256", fap->fa_id,
+                     hdr->ih_hdr_size + hdr->ih_img_size + hdr->ih_protect_tlv_size,
+                     hash_start, rc);
     if (rc) {
         goto out;
     }
@@ -275,7 +354,11 @@ bootutil_img_validate(struct boot_loader_state *state,
 #if defined(MCUBOOT_SWAP_USING_OFFSET)
     rc = bootutil_check_for_pure(hdr, fap, it.start_off);
 #else
+#ifdef MCUBOOT_RAM_LOAD
+    rc = bootutil_check_for_pure(source, hdr, fap);
+#else
     rc = bootutil_check_for_pure(hdr, fap);
+#endif
 #endif
     if (rc != 0) {
         BOOT_LOG_DBG("bootutil_img_validate: pure expected");
@@ -283,7 +366,7 @@ bootutil_img_validate(struct boot_loader_state *state,
     }
 #endif
 
-    rc = bootutil_tlv_iter_begin(&it, hdr, fap, IMAGE_TLV_ANY, false);
+    rc = TLV_ITER_BEGIN_SOURCE(source, &it, hdr, fap, IMAGE_TLV_ANY, false);
     if (rc) {
         BOOT_LOG_DBG("bootutil_img_validate: TLV iteration failed %d", rc);
         goto out;
@@ -346,7 +429,7 @@ bootutil_img_validate(struct boot_loader_state *state,
                 rc = -1;
                 goto out;
             }
-            rc = LOAD_IMAGE_DATA(hdr, fap, off, buf, sizeof(hash));
+            rc = LOAD_IMAGE_DATA_SOURCE(source, hdr, fap, off, buf, sizeof(hash));
             if (rc) {
                 goto out;
             }
@@ -373,13 +456,13 @@ bootutil_img_validate(struct boot_loader_state *state,
                 goto out;
             }
 #ifndef MCUBOOT_HW_KEY
-            rc = LOAD_IMAGE_DATA(hdr, fap, off, buf, len);
+            rc = LOAD_IMAGE_DATA_SOURCE(source, hdr, fap, off, buf, len);
             if (rc) {
                 goto out;
             }
             key_id = bootutil_find_key(buf, len);
 #else
-            rc = LOAD_IMAGE_DATA(hdr, fap, off, key_buf, len);
+            rc = LOAD_IMAGE_DATA_SOURCE(source, hdr, fap, off, key_buf, len);
             if (rc) {
                 goto out;
             }
@@ -405,13 +488,22 @@ bootutil_img_validate(struct boot_loader_state *state,
                 rc = -1;
                 goto out;
             }
-            rc = LOAD_IMAGE_DATA(hdr, fap, off, buf, len);
+            rc = LOAD_IMAGE_DATA_SOURCE(source, hdr, fap, off, buf, len);
             if (rc) {
                 goto out;
             }
 #ifndef MCUBOOT_SIGN_PURE
+            N6_BOOT_TIME_BEGIN(signature_start);
             FIH_CALL(bootutil_verify_sig, valid_signature, hash, sizeof(hash),
                                                            buf, len, key_id);
+            N6_BOOT_TIME_END("ecdsa_p256", fap->fa_id, sizeof(hash), signature_start,
+                             FIH_EQ(valid_signature, FIH_SUCCESS) ? 0 : -1);
+#else
+#ifdef MCUBOOT_RAM_LOAD
+            rc = bootutil_get_image_data_address(source, hdr, fap, 0, &image_data);
+            if (rc != 0) {
+                goto out;
+            }
 #else
             rc = flash_device_base(flash_area_get_device_id(fap), &base);
             if (rc != 0) {
@@ -421,12 +513,13 @@ bootutil_img_validate(struct boot_loader_state *state,
 #if defined(MCUBOOT_SWAP_USING_OFFSET)
             base += boot_get_state_secondary_offset(state, fap);
 #endif
+            image_data = (void *)(base + flash_area_get_off(fap));
+#endif
 
-            /* Directly check signature on the image, by using the mapping of
-             * a device to memory. The pointer is beginning of image in flash,
-             * so offset of area, the range is header + image + protected tlvs.
+            /* A pure signature covers the selected image copy directly,
+             * including its header, payload and protected TLVs.
              */
-            FIH_CALL(bootutil_verify_sig, valid_signature, (void *)(base + flash_area_get_off(fap)),
+            FIH_CALL(bootutil_verify_sig, valid_signature, (void *)image_data,
                      hdr->ih_hdr_size + hdr->ih_img_size + hdr->ih_protect_tlv_size,
                      buf, len, key_id);
 #endif
@@ -447,7 +540,7 @@ bootutil_img_validate(struct boot_loader_state *state,
                 goto out;
             }
 
-            rc = LOAD_IMAGE_DATA(hdr, fap, off, &img_security_cnt, len);
+            rc = LOAD_IMAGE_DATA_SOURCE(source, hdr, fap, off, &img_security_cnt, len);
             if (rc) {
                 goto out;
             }
@@ -502,7 +595,7 @@ bootutil_img_validate(struct boot_loader_state *state,
                 goto out;
             }
 
-            rc = LOAD_IMAGE_DATA(hdr, fap, off, img_uuid_vid.raw, len);
+            rc = LOAD_IMAGE_DATA_SOURCE(source, hdr, fap, off, img_uuid_vid.raw, len);
             if (rc) {
                 goto out;
             }
@@ -531,7 +624,7 @@ bootutil_img_validate(struct boot_loader_state *state,
                 goto out;
             }
 
-            rc = LOAD_IMAGE_DATA(hdr, fap, off, img_uuid_cid.raw, len);
+            rc = LOAD_IMAGE_DATA_SOURCE(source, hdr, fap, off, img_uuid_cid.raw, len);
             if (rc) {
                 goto out;
             }

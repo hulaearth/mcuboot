@@ -296,6 +296,89 @@ int invoke_boot_go(struct sim_context *ctx, struct area_desc *adesc,
     }
 }
 
+/* Simulated flash supports reads, but is not memory mapped. */
+int flash_device_base(uint8_t fd_id, uintptr_t *ret)
+{
+    (void)fd_id;
+    (void)ret;
+    return -ENOTSUP;
+}
+
+#ifdef MCUBOOT_RAM_LOAD
+/* Validate an already loaded image, optionally corrupting only its RAM copy. */
+int invoke_validate_image_source(struct sim_context *ctx, struct area_desc *adesc,
+                                 int use_flash, int corrupt_ram)
+{
+    struct boot_loader_state *state = malloc(sizeof(*state));
+    const struct flash_area *fap;
+    struct image_header hdr;
+    uint8_t tmp_buf[256];
+    uint8_t *payload = NULL;
+    FIH_DECLARE(valid, FIH_FAILURE);
+    int rc;
+
+    sim_set_flash_areas(adesc);
+    sim_set_context(ctx);
+    boot_state_init(state);
+    rc = flash_area_open(FLASH_AREA_IMAGE_PRIMARY(0), &fap);
+    if (rc != 0) {
+        goto out;
+    }
+    rc = boot_image_load_header(fap, &hdr);
+    if (rc != 0) {
+        goto close;
+    }
+
+#ifdef MCUBOOT_ENC_IMAGES
+    /* Serial recovery prepares the key for flash validation of either slot. */
+    if (use_flash && IS_ENCRYPTED(&hdr)) {
+        struct boot_status bs;
+        rc = boot_enc_load_source(BOOTUTIL_DATA_SOURCE_FLASH, state, BOOT_SLOT_PRIMARY,
+                                  &hdr, fap, &bs);
+        if (rc >= 0) {
+            rc = boot_enc_set_key(BOOT_CURR_ENC_SLOT(state, BOOT_SLOT_PRIMARY),
+                                  bs.enckey[BOOT_SLOT_PRIMARY]);
+        }
+        bootutil_wipe_memory(&bs, sizeof(bs));
+        if (rc != 0) {
+            goto close;
+        }
+    }
+#endif
+    /* An invalid context must fail before reading either image copy. */
+    FIH_CALL(bootutil_img_validate_source, valid, (enum bootutil_data_source)0,
+             state, &hdr, fap, tmp_buf, sizeof(tmp_buf), NULL, 0, NULL);
+    if (FIH_EQ(valid, FIH_SUCCESS)) {
+        rc = -2;
+        goto close;
+    }
+
+    if (corrupt_ram) {
+        payload = (uint8_t *)(IMAGE_RAM_BASE + hdr.ih_load_addr + hdr.ih_hdr_size);
+        *payload ^= 1;
+    }
+    FIH_CALL(bootutil_img_validate_source, valid,
+             use_flash ? BOOTUTIL_DATA_SOURCE_FLASH : BOOTUTIL_DATA_SOURCE_RAM,
+             state, &hdr, fap,
+             tmp_buf, sizeof(tmp_buf), NULL, 0, NULL);
+    rc = FIH_EQ(valid, FIH_SUCCESS) ? 0 : -1;
+    if (payload != NULL) {
+        *payload ^= 1;
+    }
+close:
+    flash_area_close(fap);
+out:
+#ifdef MCUBOOT_ENC_IMAGES
+    boot_enc_zeroize(BOOT_CURR_ENC(state));
+#endif
+    boot_state_clear(state);
+    free(state);
+    sim_reset_flash_areas();
+    sim_reset_context();
+    return rc;
+}
+#endif
+
 int invoke_boot_load_image_from_flash_to_sram(struct sim_context *ctx, struct area_desc *adesc)
 {
 #ifdef MCUBOOT_RAM_LOAD

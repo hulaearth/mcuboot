@@ -63,6 +63,7 @@
 
 #include <bootutil/image.h>
 #include <bootutil/bootutil.h>
+#include <bootutil/boot_timing.h>
 
 #include "boot_serial/boot_serial.h"
 #include "boot_serial_priv.h"
@@ -76,6 +77,26 @@
 #include "bootutil/boot_hooks.h"
 
 BOOT_LOG_MODULE_DECLARE(mcuboot);
+
+#if defined(MCUBOOT_RAM_LOAD) && defined(MCUBOOT_RAM_LOAD_REVERT) && \
+    defined(MCUBOOT_SERIAL_IMG_GRP_IMAGE_STATE)
+/* boot_go() exposes the selected identity for one image in boot_rsp. */
+_Static_assert(BOOT_IMAGE_NUMBER == 1, "RAM-load-revert serial state requires one image");
+/* Keep the boot selection when serial recovery clears boot_loader_state. */
+static struct {
+    bool valid;
+    uint8_t flash_dev_id;
+    uint32_t image_off;
+} boot_serial_active_image;
+
+void
+boot_serial_set_active_image(uint8_t flash_dev_id, uint32_t image_off)
+{
+    boot_serial_active_image.valid = true;
+    boot_serial_active_image.flash_dev_id = flash_dev_id;
+    boot_serial_active_image.image_off = image_off;
+}
+#endif
 
 #if !(defined(MCUBOOT_SINGLE_APPLICATION_SLOT) || \
     defined(MCUBOOT_FIRMWARE_LOADER) ||           \
@@ -311,7 +332,9 @@ bs_list(struct boot_loader_state *state, char *buf, int len)
     zcbor_list_start_encode(cbor_state, 5);
 
     IMAGES_ITER(BOOT_CURR_IMG(state)) {
-#if defined(MCUBOOT_SERIAL_IMG_GRP_IMAGE_STATE) || defined(MCUBOOT_SWAP_USING_OFFSET)
+#if (defined(MCUBOOT_SERIAL_IMG_GRP_IMAGE_STATE) && \
+     !(defined(MCUBOOT_RAM_LOAD) && defined(MCUBOOT_RAM_LOAD_REVERT))) || \
+    defined(MCUBOOT_SWAP_USING_OFFSET)
         int swap_status = boot_swap_type_multi(BOOT_CURR_IMG(state));
 #endif
         image_index = BOOT_CURR_IMG(state);
@@ -365,7 +388,11 @@ bs_list(struct boot_loader_state *state, char *buf, int len)
                 {
 #if defined(MCUBOOT_ENC_IMAGES)
 #if !defined(MCUBOOT_SINGLE_APPLICATION_SLOT)
+#ifdef MCUBOOT_RAM_LOAD
+                    if (IS_ENCRYPTED(&hdr)) {
+#else
                     if (IS_ENCRYPTED(&hdr) && MUST_DECRYPT(fap, image_index, &hdr)) {
+#endif
                         FIH_CALL(boot_image_validate_encrypted, fih_rc, state, fap,
                                  &hdr, tmpbuf, sizeof(tmpbuf));
                     } else {
@@ -379,7 +406,12 @@ bs_list(struct boot_loader_state *state, char *buf, int len)
                             hdr.ih_flags &= ~ENCRYPTIONFLAGS;
                         }
 #endif
-                        FIH_CALL(bootutil_img_validate, fih_rc, state, &hdr,
+#ifdef MCUBOOT_RAM_LOAD
+                        FIH_CALL(bootutil_img_validate_source, fih_rc, BOOTUTIL_DATA_SOURCE_FLASH,
+#else
+                        FIH_CALL(bootutil_img_validate, fih_rc,
+#endif
+                                 state, &hdr,
                                  fap, tmpbuf, sizeof(tmpbuf), NULL, 0, NULL);
 #if defined(MCUBOOT_ENC_IMAGES) && !defined(MCUBOOT_SINGLE_APPLICATION_SLOT)
                     }
@@ -390,6 +422,16 @@ bs_list(struct boot_loader_state *state, char *buf, int len)
             if (FIH_NOT_EQ(fih_rc, FIH_SUCCESS)) {
                 continue;
             }
+
+#if defined(MCUBOOT_SERIAL_IMG_GRP_IMAGE_STATE) && defined(MCUBOOT_RAM_LOAD) && \
+    defined(MCUBOOT_RAM_LOAD_REVERT)
+            struct boot_swap_state slot_state;
+
+            rc = boot_read_swap_state(fap, &slot_state);
+            if (rc != 0) {
+                continue;
+            }
+#endif
 
 #ifdef MCUBOOT_SERIAL_IMG_GRP_HASH
             /* Retrieve hash of image for identification */
@@ -408,6 +450,13 @@ bs_list(struct boot_loader_state *state, char *buf, int len)
 #endif
 
 #ifdef MCUBOOT_SERIAL_IMG_GRP_IMAGE_STATE
+#if defined(MCUBOOT_RAM_LOAD) && defined(MCUBOOT_RAM_LOAD_REVERT)
+            active = boot_serial_active_image.valid &&
+                     flash_area_get_device_id(fap) == boot_serial_active_image.flash_dev_id &&
+                     flash_area_get_off(fap) == boot_serial_active_image.image_off;
+            confirmed = slot_state.image_ok == BOOT_FLAG_SET;
+            pending = slot_state.magic == BOOT_MAGIC_GOOD && !confirmed;
+#else
             if (swap_status == BOOT_SWAP_TYPE_NONE) {
                 if (slot == BOOT_SLOT_PRIMARY) {
                     confirmed = true;
@@ -433,6 +482,7 @@ bs_list(struct boot_loader_state *state, char *buf, int len)
                     confirmed = true;
                 }
             }
+#endif
 
             if (!(hdr.ih_flags & IMAGE_F_NON_BOOTABLE)) {
                 zcbor_tstr_put_lit_cast(cbor_state, "bootable");
@@ -497,7 +547,7 @@ bs_set(struct boot_loader_state *state, char *buf, int len)
      *   "hash":<hash of image (OPTIONAL for single image only)>
      * }
      */
-    uint32_t slot;
+    uint32_t slot = BOOT_SLOT_SECONDARY;
     uint8_t image_index = 0;
     size_t decoded = 0;
     uint8_t hash[IMAGE_HASH_SIZE];
@@ -591,7 +641,12 @@ bs_set(struct boot_loader_state *state, char *buf, int len)
                                      &hdr, tmpbuf, sizeof(tmpbuf));
                         } else {
 #endif
-                            FIH_CALL(bootutil_img_validate, fih_rc, state, &hdr,
+#ifdef MCUBOOT_RAM_LOAD
+                        FIH_CALL(bootutil_img_validate_source, fih_rc, BOOTUTIL_DATA_SOURCE_FLASH,
+#else
+                        FIH_CALL(bootutil_img_validate, fih_rc,
+#endif
+                                 state, &hdr,
                                      fap, tmpbuf, sizeof(tmpbuf), NULL, 0, NULL);
 #ifdef MCUBOOT_ENC_IMAGES
                         }
@@ -629,7 +684,18 @@ bs_set(struct boot_loader_state *state, char *buf, int len)
 #endif
 
 set_image_state:
+#if defined(MCUBOOT_RAM_LOAD) && defined(MCUBOOT_RAM_LOAD_REVERT)
+    /* Both slots can boot without swapping. A hash selects the requested slot;
+     * hashless single-image requests retain the secondary-slot default.
+     */
+    rc = boot_set_next(BOOT_IMG_AREA(state, slot), false, confirm);
+    if (rc == 0 && confirm) {
+        /* Confirm a slot whose magic was already written by a test request. */
+        rc = boot_set_next(BOOT_IMG_AREA(state, slot), true, true);
+    }
+#else
     rc = boot_set_pending_multi(image_index, confirm);
+#endif
 
 out:
     if (rc == 0) {
@@ -1218,7 +1284,8 @@ out:
 
     boot_serial_output();
 
-#ifdef MCUBOOT_ENC_IMAGES
+#if defined(MCUBOOT_ENC_IMAGES) && !defined(MCUBOOT_RAM_LOAD)
+    /* RAM-load decrypts while copying to RAM; retain encrypted flash data. */
     if (rc == 0 && fap != NULL) {
         /* Check if this upload was for the primary slot */
 #if !defined(MCUBOOT_SERIAL_DIRECT_IMAGE_UPLOAD)
@@ -1646,13 +1713,16 @@ boot_serial_read_console(const struct boot_uart_funcs *f,int timeout_in_ms)
 #endif
     int full_line;
     int max_input;
+#if defined(MCUBOOT_SERIAL_WAIT_FOR_DFU) && \
+    !defined(CONFIG_SOC_SERIES_STM32N6X)
     int elapsed_in_ms = 0;
-#ifdef MCUBOOT_SERIAL_WAIT_FOR_DFU
-    /* Start of the iteration charged against the timeout; rolled forward at
-     * the loop's end so every ms in the loop counts, not just f->read().
-     */
+    /* Charge each complete loop iteration against the timeout. */
     uint32_t start = k_uptime_get_32();
     uint32_t now;
+#endif
+#if defined(MCUBOOT_SERIAL_WAIT_FOR_DFU) && defined(CONFIG_SOC_SERIES_STM32N6X)
+    /* Use a monotonic 64-bit deadline to avoid uptime wrap on N6. */
+    int64_t deadline_ms = k_uptime_get() + timeout_in_ms;
 #endif
 #ifdef MCUBOOT_SERIAL_RAW_PROTOCOL_INPUT_TIMEOUT
     uint32_t raw_input_start = 0;
@@ -1745,15 +1815,23 @@ check_timeout:
 #endif
         /* Subtract elapsed time */
 #ifdef MCUBOOT_SERIAL_WAIT_FOR_DFU
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+        int64_t remaining_ms = deadline_ms - k_uptime_get();
+        timeout_in_ms = remaining_ms > 0 ? (int)remaining_ms : 0;
+#else
         now = k_uptime_get_32();
         elapsed_in_ms = (int)(now - start);
         start = now;
-#endif
         timeout_in_ms -= elapsed_in_ms;
+#endif
+#endif
 #ifdef MCUBOOT_SERIAL_INACTIVITY_TIMEOUT
         if (bs_rearm_pending) {
             bs_rearm_pending = false;
             timeout_in_ms = bs_rearm_ms;
+#if defined(MCUBOOT_SERIAL_WAIT_FOR_DFU) && defined(CONFIG_SOC_SERIES_STM32N6X)
+            deadline_ms = k_uptime_get() + bs_rearm_ms;
+#endif
         }
 #endif
     }
@@ -1833,7 +1911,7 @@ static int boot_serial_get_hash(const struct image_header *hdr,
     it.start_off = start_off;
 #endif
 
-    rc = bootutil_tlv_iter_begin(&it, hdr, fap, IMAGE_TLV_ANY, false);
+    rc = TLV_ITER_BEGIN_SOURCE(BOOTUTIL_DATA_SOURCE_FLASH, &it, hdr, fap, IMAGE_TLV_ANY, false);
     if (rc) {
         return -1;
     }

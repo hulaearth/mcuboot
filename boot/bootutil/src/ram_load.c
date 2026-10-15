@@ -26,6 +26,7 @@
  * under the License.
  */
 
+#include "bootutil/boot_timing.h"
 #include "bootutil/bootutil.h"
 #include "bootutil/bootutil_log.h"
 #include "bootutil/bootutil_public.h"
@@ -215,8 +216,10 @@ boot_copy_image_to_sram(struct boot_loader_state *state, int slot,
     fap_src = BOOT_IMG_AREA(state, slot);
     assert(fap_src != NULL);
 
+    N6_BOOT_TIME_BEGIN(copy_start);
     /* Direct copy from flash to its new location in SRAM. */
     rc = flash_area_read(fap_src, 0, (void *)(IMAGE_RAM_BASE + img_dst), img_sz);
+    N6_BOOT_TIME_END("nor_to_ram_copy", fap_src->fa_id, img_sz, copy_start, rc);
     if (rc != 0) {
         BOOT_LOG_INF("Error whilst copying image %d from Flash to SRAM: %d",
                      BOOT_CURR_IMG(state), rc);

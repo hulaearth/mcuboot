@@ -38,6 +38,7 @@
 #include <string.h>
 #include "flash_map_backend/flash_map_backend.h"
 #include "bootutil/bootutil.h"
+#include "bootutil/boot_timing.h"
 #include "bootutil/bootutil_public.h"
 #include "bootutil/image.h"
 #include "bootutil/crypto/sha.h"
@@ -2263,7 +2264,9 @@ boot_load_and_validate_images(struct boot_loader_state *state)
 #endif /* MCUBOOT_DIRECT_XIP */
 
 #if defined(MCUBOOT_DIRECT_XIP_REVERT) || defined(MCUBOOT_RAM_LOAD_REVERT)
+            N6_BOOT_TIME_BEGIN(select_start);
             rc = boot_select_or_erase(state);
+            N6_BOOT_TIME_END("slot_select_or_erase", active_slot, 0, select_start, rc);
             if (rc != 0) {
                 /* The selected image slot has been erased. */
                 state->slot_usage[BOOT_CURR_IMG(state)].slot_available[active_slot] = false;
@@ -2371,7 +2374,9 @@ context_boot_go(struct boot_loader_state *state, struct boot_rsp *rsp)
         goto out;
     }
 
+    N6_BOOT_TIME_BEGIN(metadata_start);
     rc = boot_get_slot_usage(state);
+    N6_BOOT_TIME_END("slot_metadata", -1, 0, metadata_start, rc);
     if (rc != 0) {
         goto close;
     }

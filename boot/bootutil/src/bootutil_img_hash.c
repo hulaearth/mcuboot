@@ -44,8 +44,22 @@ BOOT_LOG_MODULE_DECLARE(mcuboot);
  * (SHA384 if ECDSA-P384 is being used,
  *  SHA256 otherwise).
  */
+#ifdef MCUBOOT_RAM_LOAD
+int
+bootutil_img_hash(struct boot_loader_state *state, struct image_header *hdr,
+                  const struct flash_area *fap, uint8_t *tmp_buf, uint32_t tmp_buf_sz,
+                  uint8_t *hash_result, uint8_t *seed, int seed_len)
+{
+    return bootutil_img_hash_source(BOOTUTIL_DATA_SOURCE_RAM, state, hdr, fap,
+                                    tmp_buf, tmp_buf_sz, hash_result, seed, seed_len);
+}
+
+int
+bootutil_img_hash_source(enum bootutil_data_source source, struct boot_loader_state *state,
+#else
 int
 bootutil_img_hash(struct boot_loader_state *state,
+#endif
                   struct image_header *hdr, const struct flash_area *fap,
                   uint8_t *tmp_buf, uint32_t tmp_buf_sz, uint8_t *hash_result,
                   uint8_t *seed, int seed_len
@@ -64,9 +78,18 @@ bootutil_img_hash(struct boot_loader_state *state,
 #ifdef MCUBOOT_HASH_STORAGE_DIRECTLY
     uintptr_t base = 0;
     int fa_ret;
+
+    (void)tmp_buf;
+    (void)tmp_buf_sz;
+#endif
+#ifdef MCUBOOT_RAM_LOAD
+    const void *image_data;
+    int source_rc;
 #endif
 #if defined(MCUBOOT_ENC_IMAGES)
     int image_index;
+    int encryption_slot;
+    bool must_decrypt;
 #endif
     uint32_t sector_off = 0;
     uint32_t end;
@@ -77,14 +100,6 @@ bootutil_img_hash(struct boot_loader_state *state,
     (void)hdr_size;
     (void)blk_off;
     (void)tlv_off;
-#ifdef MCUBOOT_RAM_LOAD
-    (void)blk_sz;
-    (void)off;
-    (void)rc;
-    (void)fap;
-    (void)tmp_buf;
-    (void)tmp_buf_sz;
-#endif
 #endif
     BOOT_LOG_DBG("bootutil_img_hash");
 
@@ -95,9 +110,15 @@ bootutil_img_hash(struct boot_loader_state *state,
         image_index = BOOT_CURR_IMG(state);
     }
 
-    /* Encrypted images only exist in the secondary slot */
-    if (MUST_DECRYPT(fap, image_index, hdr) &&
-            !boot_enc_valid(BOOT_CURR_ENC_SLOT(state, BOOT_SLOT_SECONDARY))) {
+#ifdef MCUBOOT_RAM_LOAD
+    /* RAM-load can encrypt either slot; its copied RAM image is plaintext. */
+    must_decrypt = source == BOOTUTIL_DATA_SOURCE_FLASH && IS_ENCRYPTED(hdr);
+#else
+    must_decrypt = MUST_DECRYPT(fap, image_index, hdr);
+#endif
+    encryption_slot = flash_area_id_to_multi_image_slot(image_index, flash_area_get_id(fap));
+    if (must_decrypt && (state == NULL ||
+            !boot_enc_valid(BOOT_CURR_ENC_SLOT(state, encryption_slot)))) {
         BOOT_LOG_DBG("bootutil_img_hash: error encrypted image found in primary slot");
         return -1;
     }
@@ -142,22 +163,37 @@ bootutil_img_hash(struct boot_loader_state *state,
         bootutil_sha_update(&sha_ctx, seed, seed_len);
     }
 
+#ifdef MCUBOOT_RAM_LOAD
+    if (source != BOOTUTIL_DATA_SOURCE_RAM && source != BOOTUTIL_DATA_SOURCE_FLASH) {
+        bootutil_sha_drop(&sha_ctx);
+        return -1;
+    }
+    if (source == BOOTUTIL_DATA_SOURCE_RAM) {
+        source_rc = bootutil_get_image_data_address(source, hdr, fap, 0, &image_data);
+        if (source_rc != 0) {
+            bootutil_sha_drop(&sha_ctx);
+            return source_rc;
+        }
+        bootutil_sha_update(&sha_ctx, image_data, size);
+        goto finish_hash;
+    }
+#endif
 #ifdef MCUBOOT_HASH_STORAGE_DIRECTLY
     /* No chunk loading, storage is mapped to address space and can
      * be directly given to hashing function.
      */
     fa_ret = flash_device_base(flash_area_get_device_id(fap), &base);
     if (fa_ret != 0) {
+#ifdef MCUBOOT_RAM_LOAD
+        bootutil_sha_drop(&sha_ctx);
+        return fa_ret;
+#else
         base = 0;
+#endif
     }
 
     bootutil_sha_update(&sha_ctx, (void *)(base + flash_area_get_off(fap)), size);
 #else /* MCUBOOT_HASH_STORAGE_DIRECTLY */
-#ifdef MCUBOOT_RAM_LOAD
-    bootutil_sha_update(&sha_ctx,
-                        (void*)(IMAGE_RAM_BASE + hdr->ih_load_addr),
-                        size);
-#else
     for (off = 0; off < size; off += blk_sz) {
         blk_sz = size - off;
         if (blk_sz > tmp_buf_sz) {
@@ -189,14 +225,11 @@ bootutil_img_hash(struct boot_loader_state *state,
             return rc;
         }
 #ifdef MCUBOOT_ENC_IMAGES
-        if (MUST_DECRYPT(fap, image_index, hdr)) {
+        if (must_decrypt) {
             /* Only payload is encrypted (area between header and TLVs) */
-            int slot = flash_area_id_to_multi_image_slot(image_index,
-                            flash_area_get_id(fap));
-
             if (off >= hdr_size && off < tlv_off) {
                 blk_off = (off - hdr_size) & 0xf;
-                boot_enc_decrypt(BOOT_CURR_ENC_SLOT(state, slot), off - hdr_size,
+                boot_enc_decrypt(BOOT_CURR_ENC_SLOT(state, encryption_slot), off - hdr_size,
                                  blk_sz, blk_off, tmp_buf);
             }
         }
@@ -205,8 +238,10 @@ bootutil_img_hash(struct boot_loader_state *state,
 
         MCUBOOT_WATCHDOG_FEED();
     }
-#endif /* MCUBOOT_RAM_LOAD */
 #endif /* MCUBOOT_HASH_STORAGE_DIRECTLY */
+#ifdef MCUBOOT_RAM_LOAD
+finish_hash:
+#endif
     bootutil_sha_finish(&sha_ctx, hash_result);
     bootutil_sha_drop(&sha_ctx);
 
