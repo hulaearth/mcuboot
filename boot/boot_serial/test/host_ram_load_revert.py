@@ -274,3 +274,114 @@ with tempfile.TemporaryDirectory(prefix="mcuboot-serial-upload-") as directory:
                         *definitions,str(source),"-o",str(binary)],check=True)
         subprocess.run([str(binary)],check=True)
     print("PASS: actual upload completion retains RAM-load ciphertext; non-RAM decryption unchanged")
+
+# Execute the completion block before out:, including its real erase helper.
+completion = upload[upload.index("    if (rc == 0) {", upload.index("rem_bytes = img_chunk_len")):upload.rindex("\nout:\n")]
+TRAILER_PRELUDE = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <sys/types.h>
+#include <errno.h>
+#include <string.h>
+#include <stdio.h>
+#define MCUBOOT_ERASE_PROGRESSIVELY
+#define BOOT_IMAGE_HAS_STATUS_FIELDS
+#define BOOT_LOG_DBG(...) (void)0
+#define BOOT_LOG_ERR(...) (void)0
+#define MGMT_ERR_EUNKNOWN 4
+#define MGMT_ERR_EINVAL 2
+#define BOOT_HOOK_CALL(...) (++hooks, 0)
+#define SLOT_SIZE (4 * 1024 * 1024)
+#define SECTOR_SIZE 4096
+struct flash_area { int unused; };
+struct flash_sector { off_t off; };
+static unsigned char flash[SLOT_SIZE];
+static int erase_calls, hooks;
+static bool fail_erase;
+static uint32_t flash_area_get_size(const struct flash_area *fa)
+{ (void)fa;return sizeof(flash); }
+static int flash_area_get_sector(const struct flash_area *fa, off_t off, struct flash_sector *s)
+{ (void)fa;s->off=off / SECTOR_SIZE * SECTOR_SIZE;return 0; }
+static off_t flash_sector_get_off(const struct flash_sector *s) { return s->off; }
+static size_t flash_sector_get_size(const struct flash_sector *s) { (void)s;return SECTOR_SIZE; }
+static int boot_erase_region(const struct flash_area *fa, off_t start, size_t size, bool unused)
+{
+    (void)fa;(void)unused;++erase_calls;
+    assert(start >= 0 && start % SECTOR_SIZE == 0);
+    assert(size % SECTOR_SIZE == 0 && start + size <= sizeof(flash));
+    if (fail_erase) return -1;
+    memset(flash + start, 0xff, size);return 0;
+}
+'''
+TRAILER_WRAPPER = r'''
+static int complete(int rc, uint32_t curr_off, uint32_t img_size, off_t status_off)
+{
+    struct flash_area area;
+    const struct flash_area *fap=&area;
+    struct flash_sector status_sector={status_off / SECTOR_SIZE * SECTOR_SIZE};
+    uint32_t img_chunk_len=31, rem_bytes=0;
+    off_t not_yet_erased=(curr_off + img_chunk_len + SECTOR_SIZE - 1) / SECTOR_SIZE * SECTOR_SIZE;
+    (void)not_yet_erased; /* Also compile the original completion block. */
+'''
+TRAILER_MAIN = r'''
+out:
+    return rc;
+}
+static void seed(void)
+{
+    memset(flash, 0xff, sizeof(flash));
+    flash[SLOT_SIZE-8192]=0;
+    flash[SLOT_SIZE-24]=1; /* Old image_ok. */
+    memset(flash+SLOT_SIZE-16, 0x77, 16); /* Old magic. */
+    erase_calls=hooks=0;fail_erase=false;
+}
+int main(void)
+{
+    seed();
+    assert(complete(0,737000,737031,SLOT_SIZE-6192)==0);
+    assert(erase_calls==1 && hooks==1);
+    for (size_t i=SLOT_SIZE-8192;i<SLOT_SIZE;i++) assert(flash[i]==0xff);
+    seed();
+    assert(complete(0,737000,737031,SLOT_SIZE-48)==0);
+    assert(erase_calls==1 && hooks==1 && flash[SLOT_SIZE-8192]==0);
+    for (size_t i=SLOT_SIZE-4096;i<SLOT_SIZE;i++) assert(flash[i]==0xff);
+    seed();fail_erase=true;
+    assert(complete(0,737000,737031,SLOT_SIZE-6192)==MGMT_ERR_EUNKNOWN);
+    assert(erase_calls==1 && hooks==0 && flash[SLOT_SIZE-24]==1);
+    seed();
+    assert(complete(0,736969,737031,SLOT_SIZE-6192)==0);
+    assert(erase_calls==0 && hooks==0 && flash[SLOT_SIZE-24]==1);
+    for (size_t i=SLOT_SIZE-16;i<SLOT_SIZE;i++) assert(flash[i]==0x77);
+    /* Progressive erase has already cleared the first trailer sector before
+     * payload writes there. Completion must preserve those payload bytes.
+     */
+    seed();
+    uint32_t image_size=SLOT_SIZE-SECTOR_SIZE-100;
+    memset(flash+SLOT_SIZE-8192,0xff,SECTOR_SIZE);
+    memset(flash+SLOT_SIZE-8192,0x5a,image_size-(SLOT_SIZE-8192));
+    assert(complete(0,image_size-31,image_size,SLOT_SIZE-6192)==0);
+    assert(erase_calls==1 && hooks==1);
+    for (size_t i=SLOT_SIZE-8192;i<image_size;i++) assert(flash[i]==0x5a);
+    for (size_t i=image_size;i<SLOT_SIZE;i++) assert(flash[i]==0xff);
+
+    /* A nearly full image has already erased both trailer sectors. */
+    seed();image_size=SLOT_SIZE-40;
+    memset(flash+SLOT_SIZE-8192,0xff,8192);
+    memset(flash+SLOT_SIZE-8192,0x5a,image_size-(SLOT_SIZE-8192));
+    assert(complete(0,image_size-31,image_size,SLOT_SIZE-6192)==0);
+    assert(erase_calls==0 && hooks==1);
+    for (size_t i=SLOT_SIZE-8192;i<image_size;i++) assert(flash[i]==0x5a);
+    for (size_t i=image_size;i<SLOT_SIZE;i++) assert(flash[i]==0xff);
+    puts("PASS: upload trailer: two sectors, single sector, erase failure, incomplete upload, two payload overlap cases");
+}
+'''
+with tempfile.TemporaryDirectory(prefix="mcuboot-upload-trailer-") as directory:
+    source = Path(directory)/"test.c"
+    binary = Path(directory)/"test"
+    source.write_text(TRAILER_PRELUDE + "\nstatic off_t " + function(serial.replace("static off_t erase_range(", "static off_t\nerase_range("),"erase_range")
+                      + TRAILER_WRAPPER + completion + TRAILER_MAIN)
+    subprocess.run([os.environ.get("CC","gcc"),"-std=c11","-Wall","-Wextra",
+                    "-Wno-unused-label","-Werror",str(source),"-o",str(binary)],check=True)
+    subprocess.run([str(binary)],check=True)

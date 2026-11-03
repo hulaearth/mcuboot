@@ -1250,11 +1250,13 @@ bs_upload(char *buf, int len)
         curr_off += img_chunk_len + rem_bytes;
         if (curr_off == img_size) {
 #if defined(MCUBOOT_ERASE_PROGRESSIVELY) && defined(BOOT_IMAGE_HAS_STATUS_FIELDS)
-            /* Assure that sector for image trailer was erased. */
-            /* Check whether it was erased during previous upload. */
+            /* Erase remaining trailer sectors without erasing uploaded data. */
             off_t start = flash_sector_get_off(&status_sector);
 
-            if (erase_range(fap, start, start) < 0) {
+            if (start < not_yet_erased) {
+                start = not_yet_erased;
+            }
+            if (erase_range(fap, start, flash_area_get_size(fap) - 1) < 0) {
                 rc = MGMT_ERR_EUNKNOWN;
                 goto out;
             }
